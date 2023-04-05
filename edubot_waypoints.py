@@ -15,10 +15,7 @@ SPEED_MAX = 90
 dist_speedup = 0.3
 dist_max = 1
 
-targets_coords = [[-1.8, -0.9], [-1.8, 1], [0.4, 1], [0.4, -0.9], [-1.8, -0.9]]
-
-
-# todo публичные функции для координат (отдельный thread + переменные класса?)
+# todo исполнитель в отдельном потоке или через ивенты
 class WaypointsRobot:
     def __init__(self, logger=True):
         self.edubot = edubot2.EduBot(enableDisplay=False)
