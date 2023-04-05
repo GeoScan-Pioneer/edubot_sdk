@@ -16,10 +16,6 @@ class EdubotGCS(): #mavwifi.Wifi
         5: 'IN_PROGRESS',
         6: 'CANCELLED'
     }
-
-    AUTOPILOT_STATE = { #todo
-    }
-
     _SUPPORTED_CONNECTION_METHODS = ['udpout', 'serial']
 
     def __init__(self, name='edubotGCS', ip='localhost', mavlink_port=8001, connection_method='udpout',
