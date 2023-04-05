@@ -17,7 +17,7 @@ class EdubotGCS(): #mavwifi.Wifi
         6: 'CANCELLED'
     }
 
-    AUTOPILOT_STATE = {
+    AUTOPILOT_STATE = { #todo
     }
 
     _SUPPORTED_CONNECTION_METHODS = ['udpout', 'serial']
@@ -47,14 +47,7 @@ class EdubotGCS(): #mavwifi.Wifi
         self._point_reached = False
 
         self._cur_state = None
-        self._preride_state = dict(BatteryLow=None,            #todo
-                                     NavSystem=None,
-                                     Area=None,
-                                     Attitude=None,
-                                     RcExpected=None,
-                                     RcMode=None,
-                                     RcUnexpected=None,
-                                     UavStartAllowed=None)
+
 
         self.mavlink_socket = self._create_connection(connection_method=connection_method,
                                                       ip=ip, port=mavlink_port,
@@ -131,15 +124,6 @@ class EdubotGCS(): #mavwifi.Wifi
                                                mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
         self._heartbeat_send_time = time.time()
 
-    def _receive_heartbeat(self, msg):
-        try:
-            if msg._header.srcComponent == 1:
-                custom_mode = msg.custom_mode
-                custom_mode_buf = format(custom_mode, "032b")
-                status_autopilot = custom_mode_buf[24:]
-                self._cur_state = EdubotGCS.AUTOPILOT_STATE[int(status_autopilot, 2)] # todo состояние
-        except Exception:
-            pass
 
     def _mission_item_reached(self, msg):
         if self._point_seq is None:
@@ -165,20 +149,11 @@ class EdubotGCS(): #mavwifi.Wifi
                     self._is_connected = True
                     self.log(msg_type='connection', msg='CONNECTED')
                 if msg.get_type() == 'HEARTBEAT':
-                    self._receive_heartbeat(msg)
+                    pass
                 elif msg.get_type() == 'MISSION_ITEM_REACHED':
                     self._mission_item_reached(msg)
                 elif msg.get_type() == 'COMMAND_ACK':
                     msg._type += f'_{msg.command}'
-                    if msg.command == 400 and msg.result_param2 is not None:
-                        self._preflight_state.update(BatteryLow=msg.result_param2 & 0b00000001)
-                        self._preflight_state.update(NavSystem=msg.result_param2 & 0b00000010)
-                        self._preflight_state.update(Area=msg.result_param2 & 0b00000100)
-                        self._preflight_state.update(Attitude=msg.result_param2 & 0b00001000)
-                        self._preflight_state.update(RcExpected=msg.result_param2 & 0b00010000)
-                        self._preflight_state.update(RcMode=msg.result_param2 & 0b00100000)
-                        self._preflight_state.update(RcUnexpected=msg.result_param2 & 0b01000000)
-                        self._preflight_state.update(UavStartAllowed=msg.result_param2 & 0b10000000)
 
                 if msg.get_type() in self.wait_msg:
                     self.wait_msg[msg.get_type()].set()
@@ -279,10 +254,9 @@ class EdubotGCS(): #mavwifi.Wifi
 
         self.log(msg_type=cmd_name, msg=f'sending point {{LOCAL, x:{x}, y:{y}, z:{z}, yaw:{yaw}}} ...')
         mask = 0b0000_10_0_111_111_000  # _ _ _ _ yaw_rate yaw   force_set   afz afy afx   vz vy vx   z y x
-        x, y, z = y, x, -z  # ENU coordinates to NED coordinates
         self._point_reached = False
         return self._send_position_target_local_ned(command_name=cmd_name,
-                                                    coordinate_system=mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+                                                    coordinate_system=mavutil.mavlink.MAV_FRAME_LOCAL_ENU,
                                                     mask=mask, x=x, y=y, z=z, yaw=yaw)
 
     def go_to_local_point_body_fixed(self, x, y, z, yaw):
@@ -292,7 +266,6 @@ class EdubotGCS(): #mavwifi.Wifi
 
         self.log(msg_type=cmd_name, msg=f'sending point {{BODY_FIX, x:{x}, y:{y}, z:{z}, yaw:{yaw}}} ...')
         mask = 0b0000_10_0_111_111_000  # _ _ _ _ yaw_rate yaw   force_set   afz afy afx   vz vy vx   z y x
-        x, y, z = y, x, -z  # ENU coordinates to NED coordinates
         self._point_reached = False
         return self._send_position_target_local_ned(command_name=cmd_name,
                                                     coordinate_system=mavutil.mavlink.MAV_FRAME_BODY_FRD,
@@ -331,23 +304,35 @@ class EdubotGCS(): #mavwifi.Wifi
             return None
 
 
+    def get_attitude(self, get_last_received: bool = False):
+        if 'ATTITUDE' in self.msg_archive:
+            msg_dict = self.msg_archive['ATTITUDE']
+            msg = msg_dict['msg']
+            if not msg_dict['is_read'].is_set() or (msg_dict['is_read'].is_set() and get_last_received):
+                msg_dict['is_read'].set()
+                return [msg.x, msg.y, msg.z]
+            else:
+                return None
+        else:
+            return None
+
+
     def get_autopilot_state(self):
         return self._cur_state
 
-    def send_rc_channels(self, channel_1=0xFF, channel_2=0xFF, channel_3=0xFF, channel_4=0xFF,
+    def rc_channels_send(self, channel_1=0xFF, channel_2=0xFF, channel_3=0xFF, channel_4=0xFF,
                          channel_5=0xFF, channel_6=0xFF, channel_7=0xFF, channel_8=0xFF):
-        """ RC unit signal send to drone """
         self.mavlink_socket.mav.rc_channels_override_send(self.mavlink_socket.target_system,
                                                           self.mavlink_socket.target_component, channel_1,
                                                           channel_2, channel_3, channel_4, channel_5, channel_6,
                                                           channel_7, channel_8)
 
-    def raspberry_poweroff(self):
+    def raspberry_poweroff_send(self):
         return self._send_command_long(command_name='RPi_POWEROFF',
                                        command=mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
                                        target_component=42)
 
-    def raspberry_reboot(self):
+    def raspberry_reboot_send(self):
         return self._send_command_long(command_name='RPi_REBOOT',
                                        command=mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
                                        target_component=43)

@@ -1,3 +1,5 @@
+import os
+
 from pymavlink import mavutil
 # from .mavsub import wifi as mavwifi
 import time
@@ -148,11 +150,18 @@ class EdubotVehicle:
                     self._is_connected = True
                     self.log(msg_type='connection', msg='CONNECTED')
                 if msg.get_type() == 'HEARTBEAT':
-                    self._receive_heartbeat(msg)
+                    pass
                 elif msg.get_type() == 'COMMAND_ACK':
                     msg._type += f'_{msg.command}'
                 elif msg.get_type() == 'ATTITUDE':
                     self._attitude_send()
+                elif msg.get_type() == 'LOCAL_POSITION_NED':
+                    if msg.coordinate_system == ' ':
+                        self._go_to_local_point(msg)
+                    elif msg.coordinate_system == ' ':
+                        self._go_to_local_point_body_fixed(msg)
+
+                    self._local_position_ned_send()
 
                 if msg.get_type() in self.wait_msg:
                     self.wait_msg[msg.get_type()].set()
@@ -175,34 +184,42 @@ class EdubotVehicle:
         self.mavlink_socket.mav.attitude_send(0, att[0], att[1], att[2], 0, 0, 0)
 
 
-    def _local_position_ned_send(self, x=0, y=0, z=0, vx=0, vy=0, vz=0): #     msgname = "LOCAL_POSITION_NED"
-        self.mavlink_socket.mav.local_position_ned_send(0, x, y, z, vx, vy, vz)
+    def _local_position_ned_send(self): #     msgname = "LOCAL_POSITION_NED"
+        pos = self._vehicle.get_local_position()
+        self.mavlink_socket.mav.local_position_ned_send(0, pos[0], pos[1], pos[2], 0, 0, 0)
 
     def _mission_item_reached_send(self): # msgname = "MISSION_ITEM_REACHED"
         self.mavlink_socket.mav.mission_item_reached_send(self._point_seq)
 
 
     def _send_ack(self, msgid, status):
-        self.mavlink_socket.mav.command_ack_send(msgid, 2)
-
-    def _execute_command_long(self, msg):
-        if_send = True
-        in_progress = False
-
+        self.mavlink_socket.mav.command_ack_send(msgid, status)
 
 
     def _go_to_local_point_body_fixed(self, msg):
         msgname = 'LOCAL_POSITION_NED'
-        self._vehicle.go_to_local_point_body_fixed()
-        #some realization
-        #then send ack
+        self.mavlink_socket.mav.position_target_local_ned_send(0, msg.coordinate_frame, msg.type_mask, msg.x, msg.y)
+        if self._vehicle.go_to_local_point_body_fixed(msg.x, msg.y):
+            self._point_seq += 1
+            self._point_reached = True
 
     def _go_to_local_point(self, msg):
-        self._vehicle.go_to_local_point()
-        #some realization
-        #then send ack
+        self.mavlink_socket.mav.position_target_local_ned_send(0, msg.coordinate_frame, msg.type_mask, msg.x, msg.y)
+        if self._vehicle.go_to_local_point(msg.x, msg.y):
+            self._point_seq += 1
+            self._point_reached = True
+
 
     def _raspberry_poweroff(self, msg):
+        # ack needed
         self._vehicle.exit_program()
+        os.system("sudo shutdown now")
+        # how to send ack now?
+
 
     def _raspberry_reboot(self, msg):
+        # ack needed
+        self._vehicle.exit_program()
+        os.system("sudo reboot now")
+        # how to send ack now?
+
