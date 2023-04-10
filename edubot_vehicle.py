@@ -42,7 +42,7 @@ class EdubotVehicle:
         self._telemetery_timeout = 0.1
         self._telemetery_send_time = time.time() - self._telemetery_timeout
 
-        self._point_seq = None
+        self._point_seq = 0
         self._point_seq_timeout = 0.1
         self._point_seq_send_time = time.time() - self._point_seq_timeout
 
@@ -53,17 +53,6 @@ class EdubotVehicle:
         self._logger = logger
         self._log_connection = log_connection
 
-
-
-        self._cur_state = None
-        self._preflight_state = dict(BatteryLow=None,
-                                     NavSystem=None,
-                                     Area=None,
-                                     Attitude=None,
-                                     RcExpected=None,
-                                     RcMode=None,
-                                     RcUnexpected=None,
-                                     UavStartAllowed=None)
 
         self.mavlink_socket = self._create_connection(connection_method=connection_method,
                                                       ip=ip, port=mavlink_port,
@@ -151,6 +140,8 @@ class EdubotVehicle:
             if time.time() - self._telemetery_send_time >= self._telemetery_timeout:
                 self._attitude_send()
                 self._local_position_ned_send()
+            if time.time() - self._point_seq_send_time >= self._point_seq_timeout:
+                self._mission_item_reached_send()
 
             msg = self.mavlink_socket.recv_msg()
             if msg is not None:
@@ -162,15 +153,15 @@ class EdubotVehicle:
                     pass
                 elif msg.get_type() == 'COMMAND_ACK':
                     msg._type += f'_{msg.command}'
-                elif msg.get_type() == 'ATTITUDE':
-                    self._attitude_send()
-                elif msg.get_type() == 'LOCAL_POSITION_NED':
-                    if msg.coordinate_system == 'mavutil.mavlink.MAV_FRAME_LOCAL_ENU':
-                        self._go_to_local_point(msg)
-                    elif msg.coordinate_system == 'mavutil.mavlink.MAV_FRAME_BODY_FRD':
-                        self._go_to_local_point_body_fixed(msg)
 
-                    self._local_position_ned_send()
+                elif msg.get_type() == 'POSITION_TARGET_LOCAL_NED':
+                    if msg.coordinate_system == 'mavutil.mavlink.MAV_FRAME_LOCAL_ENU':
+
+                        thr = threading.Thread(target=self._go_to_local_point(msg))
+                        thr.start()
+                    elif msg.coordinate_system == 'mavutil.mavlink.MAV_FRAME_BODY_FRD':
+                        thr = threading.Thread(target=self._go_to_local_point_body_fixed(msg))
+                        thr.start()
 
                 if msg.get_type() in self.wait_msg:
                     self.wait_msg[msg.get_type()].set()
@@ -217,16 +208,13 @@ class EdubotVehicle:
             self._point_seq += 1
 
 
-    def _raspberry_poweroff(self, msg):
-        # ack needed
+    def _raspberry_poweroff(self, msg): #мб новый поток
+        self._send_ack(msg.command, 2)
         self._vehicle.exit_program()
         os.system("sudo shutdown now")
-        # how to send ack now?
-
 
     def _raspberry_reboot(self, msg):
-        # ack needed
+        self._send_ack(msg.command, 2)
         self._vehicle.exit_program()
         os.system("sudo reboot now")
-        # how to send ack now?
 
