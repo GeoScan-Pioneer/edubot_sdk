@@ -5,9 +5,7 @@ from pymavlink import mavutil
 import time
 import threading
 import socket
-import edubot_waypoints
-
-
+import edubot_waypoints_test
 
 class EdubotVehicle:
     """Edubot vehicle class"""
@@ -22,15 +20,14 @@ class EdubotVehicle:
         6: 'CANCELLED'
     }
 
-    AUTOPILOT_STATE = {
-    }
     _SUPPORTED_CONNECTION_METHODS = ['serial', 'udpin']
-    def __init__(self, name='edubotVehicle', ip='localhost', mavlink_port=8001, connection_method='udpin',
+    def __init__(self, name='edubotVehicle', ip='localhost', mavlink_port=8001, connection_method='serial',
                  device='/dev/serial0', baud=115200,
                  logger=True, log_connection=True):
 
         self.name = name
-        self._vehicle = edubot_waypoints.WaypointsRobot(logger)
+
+        self._vehicle = edubot_waypoints_test.WaypointsRobot(logger)
 
         self._is_connected = False
         self._is_connected_timeout = 1
@@ -39,12 +36,13 @@ class EdubotVehicle:
         self._heartbeat_timeout = 1
         self._heartbeat_send_time = time.time() - self._heartbeat_timeout
 
-        self._telemetery_timeout = 0.1
+        self._telemetery_timeout = 1
         self._telemetery_send_time = time.time() - self._telemetery_timeout
 
         self._point_seq = 0
-        self._point_seq_timeout = 0.1
+        self._point_seq_timeout = 1
         self._point_seq_send_time = time.time() - self._point_seq_timeout
+
 
         self._mavlink_send_timeout = 0.5
         self._mavlink_send_long_timeout = 1
@@ -57,7 +55,7 @@ class EdubotVehicle:
         self.mavlink_socket = self._create_connection(connection_method=connection_method,
                                                       ip=ip, port=mavlink_port,
                                                       device=device, baud=baud)
-        self.__is_socket_open = threading.Event()  # Flag for the concurrent thread. Signals whether or not the thread should go on running
+        self.__is_socket_open = threading.Event()
         self.__is_socket_open.set()
 
         self.msg_archive = dict()
@@ -67,7 +65,8 @@ class EdubotVehicle:
         self._message_handler_thread.daemon = True
         self._message_handler_thread.start()
 
-        self.log(msg_type='connection', msg='Connecting to drone...')
+
+        self.log(msg_type='connection', msg='Connecting to station...\n')
         # mavwifi.Wifi.__init__(self, self.mavlink_socket)
 
     def __del__(self):
@@ -106,6 +105,10 @@ class EdubotVehicle:
         self.log(msg_type='connection', msg='Close mavlink socket')
 
     def log(self, msg, msg_type=None):
+        """
+        Вывести сообщение
+        :return: None
+        """
         if msg_type == "connection" and not self._log_connection:
             return
         elif msg_type != "connection" and not self._logger:
@@ -140,11 +143,13 @@ class EdubotVehicle:
             if time.time() - self._telemetery_send_time >= self._telemetery_timeout:
                 self._attitude_send()
                 self._local_position_ned_send()
+                self._battery_status_send()
             if time.time() - self._point_seq_send_time >= self._point_seq_timeout:
                 self._mission_item_reached_send()
 
             msg = self.mavlink_socket.recv_msg()
             if msg is not None:
+                self.log(msg)
                 self._last_msg_time = time.time()
                 if not self._is_connected:
                     self._is_connected = True
@@ -154,23 +159,25 @@ class EdubotVehicle:
                 elif msg.get_type() == 'COMMAND_ACK':
                     msg._type += f'_{msg.command}'
 
-                elif msg.get_type() == 'POSITION_TARGET_LOCAL_NED':
-                    if msg.coordinate_system == 'mavutil.mavlink.MAV_FRAME_LOCAL_ENU':
 
+
+                elif msg.get_type() == 'SET_POSITION_TARGET_LOCAL_NED':                    # команда ехать в точку
+                    if self._vehicle.is_driving:  # если робот уже куда-то едет
+                        self._vehicle.stop()
+                    if msg.coordinate_frame == mavutil.mavlink.MAV_FRAME_LOCAL_ENU: # в абсолютных координатах
                         thr = threading.Thread(target=self._go_to_local_point(msg))
                         thr.start()
-                    elif msg.coordinate_system == 'mavutil.mavlink.MAV_FRAME_BODY_FRD':
+                    elif msg.coordinate_frame == mavutil.mavlink.MAV_FRAME_BODY_FRD: # в относительных старта координатах
                         thr = threading.Thread(target=self._go_to_local_point_body_fixed(msg))
                         thr.start()
 
-                if msg.get_type() in self.wait_msg:
-                    self.wait_msg[msg.get_type()].set()
+                if msg.get_type() in self.wait_msg:      # если находится в листе ожидания (например, ждем ack)
+                    self.wait_msg[msg.get_type()].set()  # триггерим Event - дождались
 
                 self.msg_archive.update({msg.get_type(): {'msg': msg, 'is_read': threading.Event()}})
 
             elif self._is_connected and (time.time() - self._last_msg_time > self._is_connected_timeout):
-                self._is_connected = False
-
+                self._is_connected = False # если
                 self.log(msg_type='connection', msg='DISCONNECTED')
 
         self.log(msg="Message handler stopped")
@@ -178,34 +185,51 @@ class EdubotVehicle:
     def _sys_status_send(self): # msgname = "SYS_STATUS"
         self.mavlink_socket.mav.sys_status_send()
 
+    def _battery_status_send(self):
+        voltages = self._vehicle.get_battery_status()
+        self.mavlink_socket.mav.battery_status_send(0, 0, 0, 0, voltages, 0, 0, 0, 0)
 
-    def _attitude_send(self): # msgname = "ATTITUDE"
+
+    def _attitude_send(self):
         att = self._vehicle.get_attitude()
         self.mavlink_socket.mav.attitude_send(0, att[0], att[1], att[2], 0, 0, 0)
+        self._telemetery_send_time = time.time()
 
 
-    def _local_position_ned_send(self): #     msgname = "LOCAL_POSITION_NED"
+    def _local_position_ned_send(self):
         pos = self._vehicle.get_local_position()
         self.mavlink_socket.mav.local_position_ned_send(0, pos[0], pos[1], pos[2], 0, 0, 0)
+        self._telemetery_send_time = time.time()
 
-    def _mission_item_reached_send(self): # msgname = "MISSION_ITEM_REACHED"
+    def _mission_item_reached_send(self):
         self.mavlink_socket.mav.mission_item_reached_send(self._point_seq)
+        self._point_seq_send_time = time.time()
 
 
     def _send_ack(self, msg, status):
         self.mavlink_socket.mav.command_ack_send(msg, status)
 
 
-    def _go_to_local_point_body_fixed(self, msg):
-        msgname = 'LOCAL_POSITION_NED'
-        self.mavlink_socket.mav.position_target_local_ned_send(0, msg.coordinate_frame, msg.type_mask, msg.x, msg.y)
-        if self._vehicle.go_to_local_point_body_fixed(msg.x, msg.y):
-            self._point_seq += 1
-
     def _go_to_local_point(self, msg):
-        self.mavlink_socket.mav.position_target_local_ned_send(0, msg.coordinate_frame, msg.type_mask, msg.x, msg.y)
-        if self._vehicle.go_to_local_point(msg.x, msg.y):
-            self._point_seq += 1
+        print("answering")
+        self.mavlink_socket.mav.position_target_local_ned_send(0, msg.target_system, msg.target_component,
+                                                               msg.coordinate_frame,
+                                                               msg.type_mask, msg.x, msg.y, 0, 0, 0, 0, 0, 0, 0)
+        self._vehicle.go_to_local_point(msg.x, msg.y)
+        self._point_seq += 1
+
+
+
+    def _go_to_local_point_body_fixed(self, msg):
+        self.mavlink_socket.mav.position_target_local_ned_send(0, msg.target_system, msg.target_component,
+                                                               msg.coordinate_frame,
+                                                               msg.type_mask, msg.x, msg.y, 0, 0, 0, 0, 0, 0, 0)
+        self._vehicle.go_to_local_point_body_fixed(msg.x, msg.y)
+        self._point_seq += 1
+
+
+    def stop(self):
+        self._vehicle.stop()
 
 
     def _raspberry_poweroff(self, msg): #мб новый поток
