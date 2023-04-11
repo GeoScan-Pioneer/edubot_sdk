@@ -18,6 +18,7 @@ dist_max = 1
 # todo исполнитель в отдельном потоке или через ивенты
 class WaypointsRobot:
     def __init__(self, logger=True):
+
         self.edubot = edubot2.EduBot(enableDisplay=False)
         self.edubot.Start()
 
@@ -26,8 +27,11 @@ class WaypointsRobot:
 
         self._time_start = time.time()
         self._battery_watch_timer = time.time()
+        self.is_driving = False
 
+        self._telemetery_timer = 0.05
         self._logger = logger
+
         self._x_filter = MedianFilter()
         self._y_filter = MedianFilter()
         self._yaw_filter = MedianFilter()
@@ -38,11 +42,11 @@ class WaypointsRobot:
             print(*values, sep=", ")
 
     def go_to_local_point(self, x_target, y_target):  # доехать до точки с заданными координатами
+        self.is_driving = True
         self._rotate_to_target(x_target, y_target)
         self._straight_to_target(x_target, y_target)
 
-    def go_to_local_point_body_fixed(self, dx,
-                                     dy):  # доехать до точки с заданным смещением относительно текущей позиции
+    def go_to_local_point_body_fixed(self, dx, dy):  # доехать до точки с заданным смещением относительно текущей позиции
         x, y, yaw = self._update_coordinates()
         self.go_to_local_point(x + dx, y + dy)
 
@@ -51,7 +55,7 @@ class WaypointsRobot:
         e_sum = 0
         x, y, yaw = self._update_coordinates()
         angle = normalize_angle(math.atan2(y_target - y, x_target - x) - yaw)
-        while abs(angle) > 0.03:
+        while abs(angle) > 0.03 and self.is_driving:
             self._check_battery()
             x, y, yaw = self._update_coordinates()
             angle = normalize_angle(math.atan2(y_target - y, x_target - x) - yaw)
@@ -70,7 +74,7 @@ class WaypointsRobot:
         x, y, yaw = self._update_coordinates()
         x_start, y_start = x, y
         dist = math.sqrt((x_target - x) ** 2 + (y_target - y) ** 2)
-        while dist > LIMIT:
+        while dist > LIMIT and self.is_driving:
             self._check_battery()
             x, y, yaw = self._update_coordinates()
             dist = math.sqrt((x_target - x) ** 2 + (y_target - y) ** 2)
@@ -125,13 +129,20 @@ class WaypointsRobot:
             self.battery_watch_timer = time.time()
             if voltage <= 6.6:
                 print("low battery")
-                self._set_speed(0, 0)
+                self.stop()
                 self.edubot.Beep()
                 self.exit_program()
 
+    def stop(self):
+        self.is_driving = False
+        self._set_speed(0, 0)
+
+    def get_battery_status(self):
+        return self.edubot.GetPowerData()
+
     def exit_program(self):
         print("exit")
-        self._set_speed(0, 0)
+        self.stop()
         self.edubot.Release()
         sys.exit()
 
