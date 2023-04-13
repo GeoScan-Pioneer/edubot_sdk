@@ -15,7 +15,6 @@ SPEED_MAX = 90
 dist_speedup = 0.3
 dist_max = 1
 
-# todo исполнитель в отдельном потоке или через ивенты
 class WaypointsRobot:
     def __init__(self, logger=True):
 
@@ -27,7 +26,6 @@ class WaypointsRobot:
 
         self._time_start = time.time()
         self._battery_watch_timer = time.time()
-        self.is_driving = False
 
         self._telemetery_timer = 0.05
         self._logger = logger
@@ -41,21 +39,26 @@ class WaypointsRobot:
             # string = ", ".join(str(round(v, 3)) for v in values) + "\n"
             print(*values, sep=", ")
 
-    def go_to_local_point(self, x_target, y_target):  # доехать до точки с заданными координатами
-        self.is_driving = True
-        self._rotate_to_target(x_target, y_target)
-        self._straight_to_target(x_target, y_target)
+    def go_to_local_point(self, x_target, y_target, driving):  # доехать до точки с заданными координатами
+        result_1 = self._rotate_to_target(x_target, y_target, driving)
+        result_2 = self._straight_to_target(x_target, y_target, driving)
+        if result_2 and result_1:
+            return True
+        return False
 
-    def go_to_local_point_body_fixed(self, dx, dy):  # доехать до точки с заданным смещением относительно текущей позиции
+    def go_to_local_point_body_fixed(self, dx, dy, driving):  # доехать до точки с заданным смещением относительно текущей позиции
         x, y, yaw = self._update_coordinates()
-        self.go_to_local_point(x + dx, y + dy)
+        return self.go_to_local_point(x + dx, y + dy, driving)
 
-    def _rotate_to_target(self, x_target, y_target):  # повернуться в сторону заданной точки
+    def _rotate_to_target(self, x_target, y_target, is_driving):  # повернуться в сторону заданной точки
         e_prev = 0
         e_sum = 0
         x, y, yaw = self._update_coordinates()
         angle = normalize_angle(math.atan2(y_target - y, x_target - x) - yaw)
-        while abs(angle) > 0.03 and self.is_driving:
+        while abs(angle) > 0.03:
+            if not is_driving.is_set():
+                self.stop()
+                return False
             self._check_battery()
             x, y, yaw = self._update_coordinates()
             angle = normalize_angle(math.atan2(y_target - y, x_target - x) - yaw)
@@ -66,36 +69,37 @@ class WaypointsRobot:
             self._data_write(x, y, yaw, u_s, u_r)
             e_prev = angle
             time.sleep(0.025)
-        self._set_speed(0, 0)
-        return
+        self.stop()
+        return True
 
-    def _straight_to_target(self, x_target, y_target):  # движение в точку с динамической коррекцией угла
+    def _straight_to_target(self, x_target, y_target, driving):  # движение в точку с динамической коррекцией угла
         e_prev = 0
         x, y, yaw = self._update_coordinates()
         x_start, y_start = x, y
         dist = math.sqrt((x_target - x) ** 2 + (y_target - y) ** 2)
-        while dist > LIMIT and self.is_driving:
+        while dist > LIMIT:
+            if not driving.is_set():
+                self.stop()
+                return False
             self._check_battery()
             x, y, yaw = self._update_coordinates()
             dist = math.sqrt((x_target - x) ** 2 + (y_target - y) ** 2)
             dist_start = math.sqrt((x_start - x) ** 2 + (y_start - y) ** 2)
             angle = normalize_angle(math.atan2(y_target - y, x_target - x) - yaw)
-
             # if dist_start < dist_speedup:
             #     u_s = SPEED_MAX * math.sqrt(dist_start / dist_speedup)  # разгон на старте
             # elif dist_speedup > dist:
             #     u_s = SPEED_MAX * math.sqrt(dist / dist_speedup)  # замедление на финише
             # else:
             #     u_s = SPEED_MAX  # движение с максимально возможной линейной скоростью + коррекция угла
-
             u_s = SPEED_MAX * saturate(math.sqrt(min(dist_start, dist) / dist_speedup), 1)
             u_r = KP * angle + KD * (angle - e_prev)
             e_prev = angle
             self._set_speed(u_s + u_r, u_s - u_r)
             self._data_write(x, y, yaw, u_s, u_r)
             time.sleep(0.025)
-        self._set_speed(0, 0)
-        return
+        self.stop()
+        return True
 
     def _set_speed(self, left, right):
         left, right = saturate(left, 100), saturate(right, 100)
@@ -134,7 +138,6 @@ class WaypointsRobot:
                 self.exit_program()
 
     def stop(self):
-        self.is_driving = False
         self._set_speed(0, 0)
 
     def get_battery_status(self):
