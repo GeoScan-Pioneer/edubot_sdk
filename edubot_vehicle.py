@@ -43,6 +43,8 @@ class EdubotVehicle:
         self._point_seq_timeout = 1
         self._point_seq_send_time = time.time() - self._point_seq_timeout
 
+        self._is_driving = threading.Event()
+        self._driving_thread = None
 
         self._mavlink_send_timeout = 0.5
         self._mavlink_send_long_timeout = 1
@@ -159,17 +161,14 @@ class EdubotVehicle:
                 elif msg.get_type() == 'COMMAND_ACK':
                     msg._type += f'_{msg.command}'
 
-
-
                 elif msg.get_type() == 'SET_POSITION_TARGET_LOCAL_NED':                    # команда ехать в точку
-                    if self._vehicle.is_driving:  # если робот уже куда-то едет
-                        self._vehicle.stop()
+
                     if msg.coordinate_frame == mavutil.mavlink.MAV_FRAME_LOCAL_ENU: # в абсолютных координатах
-                        thr = threading.Thread(target=self._go_to_local_point(msg))
-                        thr.start()
+                        self._driving_thread = threading.Thread(target=self._go_to_local_point, args= [msg, self._is_driving])
+                        self._driving_thread.start()
                     elif msg.coordinate_frame == mavutil.mavlink.MAV_FRAME_BODY_FRD: # в относительных старта координатах
-                        thr = threading.Thread(target=self._go_to_local_point_body_fixed(msg))
-                        thr.start()
+                        self._driving_thread = threading.Thread(target=self._go_to_local_point_body_fixed, args= [msg, self._is_driving])
+                        self._driving_thread.start()
 
                 if msg.get_type() in self.wait_msg:      # если находится в листе ожидания (например, ждем ack)
                     self.wait_msg[msg.get_type()].set()  # триггерим Event - дождались
@@ -210,22 +209,29 @@ class EdubotVehicle:
         self.mavlink_socket.mav.command_ack_send(msg, status)
 
 
-    def _go_to_local_point(self, msg):
-        print("answering")
+    def _go_to_local_point(self, msg, event):
+        # time_boot_ms, coordinate_frame, type_mask, x, y, z, vx, vy, vz, afx, afy, afz, yaw, yaw_rate
+        self.mavlink_socket.mav.position_target_local_ned_send(0, msg.coordinate_frame,
+                                                               msg.type_mask, msg.x, msg.y, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        if self._is_driving.is_set():
+            self._is_driving.clear()
+            time.sleep(0.5)  # todo: после теста на реальном роботе изменить
+        self._is_driving.set()
+        if self._vehicle.go_to_local_point(msg.x, msg.y, event):
+            self._point_seq += 1
+
+
+
+    def _go_to_local_point_body_fixed(self, msg, event):
         self.mavlink_socket.mav.position_target_local_ned_send(0, msg.target_system, msg.target_component,
                                                                msg.coordinate_frame,
                                                                msg.type_mask, msg.x, msg.y, 0, 0, 0, 0, 0, 0, 0)
-        self._vehicle.go_to_local_point(msg.x, msg.y)
-        self._point_seq += 1
-
-
-
-    def _go_to_local_point_body_fixed(self, msg):
-        self.mavlink_socket.mav.position_target_local_ned_send(0, msg.target_system, msg.target_component,
-                                                               msg.coordinate_frame,
-                                                               msg.type_mask, msg.x, msg.y, 0, 0, 0, 0, 0, 0, 0)
-        self._vehicle.go_to_local_point_body_fixed(msg.x, msg.y)
-        self._point_seq += 1
+        if self._is_driving.is_set():
+            self._is_driving.clear()
+            time.sleep(0.2)
+        self._is_driving.set()
+        if self._vehicle.go_to_local_point_body_fixed(msg.x, msg.y, event):
+            self._point_seq += 1
 
 
     def stop(self):
