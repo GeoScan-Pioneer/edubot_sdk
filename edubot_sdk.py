@@ -3,8 +3,11 @@ from pymavlink import mavutil
 import time
 import threading
 import socket
+import logging
+import sys
 
-class EdubotGCS(): #mavwifi.Wifi
+
+class EdubotGCS:  # mavwifi.Wifi
     """Ground Command System (PC) class"""
     MAV_RESULT = {
         -1: 'SEND_TIMEOUT',
@@ -17,11 +20,10 @@ class EdubotGCS(): #mavwifi.Wifi
         6: 'CANCELLED'
     }
     _SUPPORTED_CONNECTION_METHODS = ['udpout', 'serial']
+    logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
 
-    def __init__(self, name='edubotGCS', ip='localhost', mavlink_port=8001, connection_method='serial',
-                 device='/dev/serial0', baud=115200,
-                 logger=True, log_connection=True):
-
+    def __init__(self, name='EdubotStation', ip='localhost', mavlink_port=8001, connection_method='serial',
+                 device='/dev/serial0', baud=115200):
 
         self.name = name
 
@@ -35,9 +37,6 @@ class EdubotGCS(): #mavwifi.Wifi
         self._mavlink_send_timeout = 0.5
         self._mavlink_send_long_timeout = 1
         self._mavlink_send_number = 10
-
-        self._logger = logger
-        self._log_connection = log_connection
 
         self._point_seq = 0
         self._point_reached = False
@@ -55,11 +54,11 @@ class EdubotGCS(): #mavwifi.Wifi
         self._message_handler_thread.daemon = True
         self._message_handler_thread.start()
 
-        self.log(msg_type='connection', msg='Connecting to car...')
+        logging.info(f"[{self.name}] <Connection> connecting to car...")
         # mavwifi.Wifi.__init__(self, self.mavlink_socket)
 
     def __del__(self):
-        self.log(msg="Edubot class object removed")
+        logging.debug(f"{self.name}:object: Class object removed")
 
     def _create_connection(self, connection_method, ip, port, device, baud):
         """
@@ -67,7 +66,7 @@ class EdubotGCS(): #mavwifi.Wifi
         :return: mav_socket
         """
         if connection_method not in self._SUPPORTED_CONNECTION_METHODS:
-            raise ValueError(f"Unknown connection method: {connection_method}")
+            logging.error(f"{self.name}:Connection: Unknown connection method: {connection_method}")
 
         mav_socket = None
         try:
@@ -79,7 +78,7 @@ class EdubotGCS(): #mavwifi.Wifi
             return mav_socket
 
         except socket.error as e:
-            raise ConnectionError('Connection error. Can not connect to drone', e)
+            logging.error(f"{self.name}:Connection: Can not connect to robot: {e}")
 
     def close_connection(self):
         """
@@ -89,42 +88,22 @@ class EdubotGCS(): #mavwifi.Wifi
         self.__is_socket_open.clear()
         self._message_handler_thread.join()
         self.mavlink_socket.close()
-
-        self.log(msg_type='connection', msg='Close mavlink socket')
-
-    def log(self, msg, msg_type=None):
-        if msg_type == "connection" and not self._log_connection:
-            return
-        elif msg_type != "connection" and not self._logger:
-            return
-
-        if msg_type is None:
-            print(f"[{self.name}] {msg}")
-        else:
-            print(f"[{self.name}] <{msg_type}> {msg}")
+        logging.info(f"{self.name}:Connection: Mavlink socket closed")
 
     def connected(self):
         return self._is_connected
-
-    def set_logger(self, value: bool = True):
-        self._logger = value
-
-    def set_log_connection(self, value: bool = True):
-        self._log_connection = value
 
     def _send_heartbeat(self):
         self.mavlink_socket.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_GCS,
                                                mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
         self._heartbeat_send_time = time.time()
 
-
     def _mission_item_reached(self, msg):
         if self._point_seq is None:
             self._point_seq = msg.seq
         if msg.seq > self._point_seq:
             self._point_reached = True
-
-            self.log(msg_type='POINT_REACHED', msg=f'point_id: {msg.seq}')
+            logging.info(f"[{self.name}] <Reached> point_id {msg.seq}")
         self._point_seq = msg.seq
 
     def _message_handler(self):
@@ -137,14 +116,14 @@ class EdubotGCS(): #mavwifi.Wifi
 
             msg = self.mavlink_socket.recv_msg()
             if msg is not None:
-                self.log(msg)
+                logging.debug(f"[{self.name}] <Message> {msg}")
+
                 self._last_msg_time = time.time()
                 if not self._is_connected:
                     self._is_connected = True
-                    self.log(msg_type='connection', msg='CONNECTED')
+                    logging.info(f"[{self.name}] <Connection> connected to robot")
                 if msg.get_type() == 'HEARTBEAT':
                     pass
-                    #
                 elif msg.get_type() == 'MISSION_ITEM_REACHED':
                     self._mission_item_reached(msg)
                 elif msg.get_type() == 'COMMAND_ACK':
@@ -156,15 +135,14 @@ class EdubotGCS(): #mavwifi.Wifi
 
             elif self._is_connected and (time.time() - self._last_msg_time > self._is_connected_timeout):
                 self._is_connected = False
-                self.log(msg_type='connection', msg='DISCONNECTED')
+                logging.info(f"[{self.name}] <Connection> disconnected")
 
-        self.log(msg="Message handler stopped")
+        logging.info(f"[{self.name}] <Object> message handler stopped")
 
     def _send_command_long(self, command_name, command, param1: float = 0, param2: float = 0, param3: float = 0,
                            param4: float = 0, param5: float = 0, param6: float = 0, param7: float = 0,
-                           target_system=None, target_component=None, sending_log_msg='sending...'):
+                           target_system=None, target_component=None):
 
-        self.log(msg_type=command_name, msg=sending_log_msg)
         if target_system is None:
             target_system = self.mavlink_socket.target_system
         if target_component is None:
@@ -193,23 +171,21 @@ class EdubotGCS(): #mavwifi.Wifi
                     self.msg_archive[msg_to_wait]['is_read'].set()
                     if msg.result == 5:  # IN_PROGRESS
                         in_progress = True
-
-                        self.log(msg_type=command_name, msg=EdubotGCS.MAV_RESULT[msg.result])
+                        logging.debug(f"[{self.name}] <Ack> {command_name}, result: {EdubotGCS.MAV_RESULT[msg.result]}")
                         event.clear()
                     else:
-
-                        self.log(msg_type=command_name, msg=EdubotGCS.MAV_RESULT[msg.result])
+                        logging.debug(f"[{self.name}] <Ack> {command_name}, result: {EdubotGCS.MAV_RESULT[msg.result]}")
                         return msg.result in [0, 2]
                 else:
                     if_send = True
                 if confirm >= self._mavlink_send_number:
-                    self.log(msg_type=command_name, msg=EdubotGCS.MAV_RESULT[-1])
+                    logging.debug(f"[{self.name}] <Ack> {command_name}, result: {EdubotGCS.MAV_RESULT[-1]}")
                     return False
         finally:
             if msg_to_wait in self.wait_msg:
                 del self.wait_msg[msg_to_wait]
 
-    def _send_position_target_local_ned(self, command_name, coordinate_system, mask=0b0000_11_0_111_111_111, x=0, y=0,
+    def _send_position_target_local_ned(self, command_name, coordinate_system, x, y, mask=0b0000_11_0_111_111_111,
                                         z=0, vx=0, vy=0, vz=0, afx=0, afy=0, afz=0, yaw=0, yaw_rate=0,
                                         target_system=None, target_component=None):
         if target_system is None:
@@ -229,23 +205,21 @@ class EdubotGCS(): #mavwifi.Wifi
                     msg = self.msg_archive['POSITION_TARGET_LOCAL_NED']['msg']
                     self.msg_archive['POSITION_TARGET_LOCAL_NED']['is_read'].set()
                     if msg.type_mask == mask:
-                        self.log(msg_type=command_name, msg=EdubotGCS.MAV_RESULT[0])
+                        logging.debug(f"[{self.name}] <Ack> {command_name}, result: {EdubotGCS.MAV_RESULT[0]}")
                     else:
-                        self.log(msg_type=command_name, msg=EdubotGCS.MAV_RESULT[2])
+                        logging.debug(f"[{self.name}] <Ack> {command_name}, result: {EdubotGCS.MAV_RESULT[2]}")
                     return True
 
-            self.log(msg_type=command_name, msg=EdubotGCS.MAV_RESULT[-1])
+            logging.debug(f"[{self.name}] <Ack> {command_name}, result: {EdubotGCS.MAV_RESULT[-1]}")
             return False
         finally:
             if 'POSITION_TARGET_LOCAL_NED' in self.wait_msg:
                 del self.wait_msg['POSITION_TARGET_LOCAL_NED']
 
-
     def go_to_local_point(self, x, y):
         """ Поездка в точку с глобальными координатами """
         cmd_name = 'GO_TO_POINT'
-
-        self.log(msg_type=cmd_name, msg=f'sending point {{LOCAL, x:{x}, y:{y}}} ...\n')
+        logging.info(f"[{self.name}] <Point> target: local point {{x:{x}, y:{y}}}...")
         mask = 0b0000_10_0_111_111_000  # _ _ _ _ yaw_rate yaw   force_set   afz afy afx   vz vy vx   z y x
         self._point_reached = False
         return self._send_position_target_local_ned(command_name=cmd_name,
@@ -254,9 +228,8 @@ class EdubotGCS(): #mavwifi.Wifi
 
     def go_to_local_point_body_fixed(self, x, y):
         """ Поездка в точку с координатами, заданными относительно текущих """
-        cmd_name = 'GO_TO_POINT'
-
-        self.log(msg_type=cmd_name, msg=f'sending point {{BODY_FIX, x:{x}, y:{y}}} ...\n')
+        cmd_name = 'GO_TO_POINT_BODY_FIXED'
+        logging.info(f"[{self.name}] <Point> target: body_fixed point {{x:{x}, y:{y}}}...")
         mask = 0b0000_10_0_111_111_000  # _ _ _ _ yaw_rate yaw   force_set   afz afy afx   vz vy vx   z y x
         self._point_reached = False
         return self._send_position_target_local_ned(command_name=cmd_name,
@@ -296,7 +269,6 @@ class EdubotGCS(): #mavwifi.Wifi
         else:
             return None
 
-
     def get_attitude(self, get_last_received: bool = False):
         """ Возвращает значение угла рыскания робота """
         if 'ATTITUDE' in self.msg_archive:
@@ -311,7 +283,7 @@ class EdubotGCS(): #mavwifi.Wifi
             return None
 
     def _rc_channels_send(self, channel_1=0xFF, channel_2=0xFF, channel_3=0xFF, channel_4=0xFF,
-                         channel_5=0xFF, channel_6=0xFF, channel_7=0xFF, channel_8=0xFF):
+                          channel_5=0xFF, channel_6=0xFF, channel_7=0xFF, channel_8=0xFF):
         self.mavlink_socket.mav.rc_channels_override_send(self.mavlink_socket.target_system,
                                                           self.mavlink_socket.target_component, channel_1,
                                                           channel_2, channel_3, channel_4, channel_5, channel_6,
@@ -328,7 +300,3 @@ class EdubotGCS(): #mavwifi.Wifi
         return self._send_command_long(command_name='RPi_REBOOT',
                                        command=mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
                                        target_component=43)
-
-
-
-

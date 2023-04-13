@@ -1,5 +1,6 @@
 #!/usr/bin/env python3.8
 # -*- coding: utf-8 -*-
+import logging
 
 import edubot2
 from gs_lps import *
@@ -16,14 +17,14 @@ SPEED_MAX = 90
 dist_speedup = 0.3
 dist_max = 1
 
+
 class WaypointsRobot:
-    def __init__(self, logger=True):
+    def __init__(self):
         self.edubot = edubot2.EduBot(enableDisplay=False)
         self.edubot.Start()
 
         self._time_start = time.time()
         self._battery_watch_timer = time.time()
-        self._logger = logger
 
         self._telemetery_thread = threading.Thread(target=self._update_coordinates, daemon=True)
         self._telemetery_thread.daemon = True
@@ -39,11 +40,6 @@ class WaypointsRobot:
         self.y = 0
         self.yaw = 0
 
-    def _data_write(self, *values):  # конкатенирует все аргументы в строку и записывает в файл
-        if self._logger:
-            # string = ", ".join(str(round(v, 3)) for v in values) + "\n"
-            print(*values, sep=", ")
-
     def go_to_local_point(self, x_target, y_target, driving):  # доехать до точки с заданными координатами
         result_1 = self._rotate_to_target(x_target, y_target, driving)
         result_2 = self._straight_to_target(x_target, y_target, driving)
@@ -51,7 +47,8 @@ class WaypointsRobot:
             return True
         return False
 
-    def go_to_local_point_body_fixed(self, dx, dy, driving):  # доехать до точки с заданным смещением относительно текущей позиции
+    def go_to_local_point_body_fixed(self, dx, dy,
+                                     driving):  # доехать до точки с заданным смещением относительно текущей позиции
         x, y, yaw = self.x, self.y, self.yaw
         return self.go_to_local_point(x + dx, y + dy, driving)
 
@@ -71,7 +68,7 @@ class WaypointsRobot:
             u_s = 0
             u_r = KR * angle + KD * (angle - e_prev)
             self._set_speed(u_s + u_r, u_s - u_r)
-            self._data_write(x, y, yaw, u_s, u_r)
+            logging.info(x, y, yaw, u_s, u_r)
             e_prev = angle
             time.sleep(0.025)
         self.stop()
@@ -101,7 +98,7 @@ class WaypointsRobot:
             u_r = KP * angle + KD * (angle - e_prev)
             e_prev = angle
             self._set_speed(u_s + u_r, u_s - u_r)
-            self._data_write(x, y, yaw, u_s, u_r)
+            logging.info(x, y, yaw, u_s, u_r)
             time.sleep(0.025)
         self.stop()
         return True
@@ -119,11 +116,11 @@ class WaypointsRobot:
             angles = self._nav.get_angles()
             if pos is not None and angles is not None:  # при сбое могут прийти координаты (0, 0)
                 x, y = self._x_filter.filter(pos[0]), self._y_filter.filter(pos[1])
-                yaw = self._yaw_filter.filter(angles[2]) + 3.14  # поворот системы координат, чтобы угол отсчитывался от оси x
+                yaw = self._yaw_filter.filter(
+                    angles[2]) + 3.14  # поворот системы координат, чтобы угол отсчитывался от оси x
                 if time.time() - self._telemetery_send_time >= self._telemetery_timeout:
                     self._telemetery_send_time = time.time()
                     self.x, self.y, self.yaw = x, y, yaw
-
 
     def get_local_position(self):
         return [self.x, self.y, 0]
