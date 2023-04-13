@@ -88,7 +88,7 @@ class EdubotGCS:  # mavwifi.Wifi
         self.__is_socket_open.clear()
         self._message_handler_thread.join()
         self.mavlink_socket.close()
-        logging.info(f"{self.name}:Connection: Mavlink socket closed")
+        logging.info(f"[{self.name}] <Connection> Mavlink socket closed")
 
     def connected(self):
         return self._is_connected

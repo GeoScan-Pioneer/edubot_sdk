@@ -68,7 +68,7 @@ class WaypointsRobot:
             u_s = 0
             u_r = KR * angle + KD * (angle - e_prev)
             self._set_speed(u_s + u_r, u_s - u_r)
-            logging.info(x, y, yaw, u_s, u_r)
+            logging.debug(x, y, yaw, u_s, u_r)
             e_prev = angle
             time.sleep(0.025)
         self.stop()
@@ -98,7 +98,7 @@ class WaypointsRobot:
             u_r = KP * angle + KD * (angle - e_prev)
             e_prev = angle
             self._set_speed(u_s + u_r, u_s - u_r)
-            logging.info(x, y, yaw, u_s, u_r)
+            logging.debug(x, y, yaw, u_s, u_r)
             time.sleep(0.025)
         self.stop()
         return True

@@ -136,7 +136,7 @@ class EdubotVehicle:
                     logging.info(f"[{self.name}] <Connection> connected to robot")
                 if msg.get_type() == 'HEARTBEAT':
                     pass
-                elif msg.get_type() == 'COMMAND_ACK'
+                elif msg.get_type() == 'COMMAND_ACK':
                     msg._type += f'_{msg.command}'
 
                 elif msg.get_type() == 'SET_POSITION_TARGET_LOCAL_NED':  # команда ехать в точку
