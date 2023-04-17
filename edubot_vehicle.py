@@ -25,7 +25,7 @@ class EdubotVehicle:
     _SUPPORTED_CONNECTION_METHODS = ['serial', 'udpin']
 
     def __init__(self, name='EdubotVehicle', ip='localhost', mavlink_port=8001, connection_method='serial',
-                 device='/dev/serial0', baud=115200):
+                 device='/dev/serial0', baud=115200, logging_level='INFO'):
 
         self.name = name
 
@@ -127,13 +127,15 @@ class EdubotVehicle:
             msg = self.mavlink_socket.recv_msg()
             if msg is not None:
                 logging.debug(f"[{self.name}] <Message> {msg}")
-                # if (msg.get_type() == "COMMAND_LONG") and (msg.command == "PREFLIGHT_REBOOT_SHUTDOWN"):
-                #         if msg.target_component==42:
-                #             self._raspberry_poweroff(msg)
+                if (msg.get_type() == "COMMAND_LONG") and (msg.command == mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN):
+                        if msg.target_component==42:
+                            self._raspberry_poweroff(msg)
+                        elif msg.target_component==43:
+                            self._raspberry_reboot(msg)
                 self._last_msg_time = time.time()
                 if not self._is_connected:
                     self._is_connected = True
-                    logging.info(f"[{self.name}] <Connection> connected to robot")
+                    logging.info(f"[{self.name}] <Connection> connected to station")
                 if msg.get_type() == 'HEARTBEAT':
                     pass
                 elif msg.get_type() == 'COMMAND_ACK':
@@ -209,11 +211,14 @@ class EdubotVehicle:
         self._vehicle.stop()
 
     def _raspberry_poweroff(self, msg):  # мб новый поток
-        self._send_ack(msg.command, 2)
+        print(msg.command)
+        self._send_ack(msg.command, 0)
         self._vehicle.exit_program()
+        time.sleep(2)
         os.system("sudo shutdown now")
 
     def _raspberry_reboot(self, msg):
-        self._send_ack(msg.command, 2)
+        self._send_ack(msg.command, 0)
+        time.sleep()
         self._vehicle.exit_program()
         os.system("sudo reboot now")
