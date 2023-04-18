@@ -5,7 +5,7 @@ from pymavlink import mavutil
 import time
 import threading
 import socket
-import edubot_waypoints_test
+import edubot_waypoints
 import logging
 
 
@@ -29,7 +29,7 @@ class EdubotVehicle:
 
         self.name = name
 
-        self._vehicle = edubot_waypoints_test.WaypointsRobot()
+        self._vehicle = edubot_waypoints.WaypointsRobot()
 
         self._is_connected = False
         self._is_connected_timeout = 1
@@ -222,3 +222,11 @@ class EdubotVehicle:
         time.sleep()
         self._vehicle.exit_program()
         os.system("sudo reboot now")
+        
+if __name__ = "__main__":
+    robot = EdubotVehicle()
+    try:
+        while True:
+            pass
+    except KeyboardInterrupt:
+        sys.exit()
