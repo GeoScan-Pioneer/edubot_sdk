@@ -20,12 +20,13 @@ class EdubotGCS:  # mavwifi.Wifi
         6: 'CANCELLED'
     }
     _SUPPORTED_CONNECTION_METHODS = ['udpout', 'serial']
-    logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
+    
 
     def __init__(self, name='EdubotStation', ip='localhost', mavlink_port=8001, connection_method='serial',
-                 device='/dev/serial0', baud=115200):
+                 device='/dev/serial0', baud=115200, logging_level = logging.WARNING):
 
         self.name = name
+        logging.basicConfig(level=logging_level, stream=sys.stdout)
 
         self._is_connected = False
         self._is_connected_timeout = 1
