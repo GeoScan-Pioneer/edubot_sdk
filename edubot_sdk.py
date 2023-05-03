@@ -1,48 +1,55 @@
-from pymavlink import mavutil
-# from .mavsub import wifi as mavwifi
-import time
-import threading
+import dataclasses
+import enum
 import socket
-import logging
-import sys
+import threading
+
+from pymavlink import mavutil
+from pymavlink.dialects.v20.common import *
 
 
 class EdubotGCS:  # mavwifi.Wifi
     """Ground Command System (PC) class"""
-    MAV_RESULT = {
-        -1: 'SEND_TIMEOUT',
-        0: 'ACCEPTED',
-        1: 'TEMPORARILY_REJECTED',
-        2: 'DENIED',
-        3: 'UNSUPPORTED',
-        4: 'FAILED',
-        5: 'IN_PROGRESS',
-        6: 'CANCELLED'
-    }
-    _SUPPORTED_CONNECTION_METHODS = ['udpout', 'serial']
-    
 
-    def __init__(self, name='EdubotStation', ip='localhost', mavlink_port=8001, connection_method='serial',
-                 device='/dev/serial0', baud=115200, logging_level = logging.WARNING):
+    class ConnectionMethod(enum.Enum):
+        updin = 0
+        udpout = 1
+        serial = 2
+
+    class __MavResult(enum.Enum):
+        SEND_TIMEOUT = -1
+        ACCEPTED = MAV_RESULT_ACCEPTED
+        TEMPORARILY_REJECTED = MAV_RESULT_TEMPORARILY_REJECTED
+        DENIED = MAV_RESULT_DENIED
+        UNSUPPORTED = MAV_RESULT_UNSUPPORTED
+        FAILED = MAV_RESULT_FAILED
+        IN_PROGRESS = MAV_RESULT_IN_PROGRESS
+        CANCELLED = 6
+
+    @dataclasses.dataclass
+    class __MavSettings:
+        connected_timeout: float = 1  # таймаут для принятия решения о потере соединения
+        heartbeat_timeout: float = 1  # таймаут для отправки heartbeat
+        mavlink_send_timeout: float = 0.5
+        mavlink_send_long_timeout: float = 1
+        mavlink_send_number: int = 10  # кол-во попыток отпрвки command_long
+
+    logging.basicConfig(level=logging.CRITICAL, stream=sys.stdout)
+
+    def __init__(self, ip='localhost', mavlink_port=8001, connectionMethod=ConnectionMethod.udpout,
+                 device='/dev/serial0', baud=115200, name='EdubotStation'):
 
         self.name = name
-        logging.basicConfig(level=logging_level, stream=sys.stdout)
+
+        self.__mav_settings = self.__MavSettings()
 
         self._is_connected = False
-        self._is_connected_timeout = 1
-        self._last_msg_time = time.time() - self._is_connected_timeout
-
-        self._heartbeat_timeout = 1
-        self._heartbeat_send_time = time.time() - self._heartbeat_timeout
-
-        self._mavlink_send_timeout = 0.5
-        self._mavlink_send_long_timeout = 1
-        self._mavlink_send_number = 10
+        self._last_msg_time = time.time() - self.__mav_settings.connected_timeout
+        self._heartbeat_send_time = time.time() - self.__mav_settings.heartbeat_timeout
 
         self._point_seq = 0
         self._point_reached = False
 
-        self.mavlink_socket = self._create_connection(connection_method=connection_method,
+        self.mavlink_socket = self._create_connection(connectionMethod=connectionMethod,
                                                       ip=ip, port=mavlink_port,
                                                       device=device, baud=baud)
         self.__is_socket_open = threading.Event()  # Flag for the concurrent thread. Signals whether or not the thread should go on running
@@ -56,25 +63,24 @@ class EdubotGCS:  # mavwifi.Wifi
         self._message_handler_thread.start()
 
         logging.info(f"[{self.name}] <Connection> connecting to car...")
-        # mavwifi.Wifi.__init__(self, self.mavlink_socket)
 
     def __del__(self):
         logging.debug(f"{self.name}:object: Class object removed")
 
-    def _create_connection(self, connection_method, ip, port, device, baud):
+    def _create_connection(self, connectionMethod, ip, port, device, baud):
         """
         create mavlink connection
         :return: mav_socket
         """
-        if connection_method not in self._SUPPORTED_CONNECTION_METHODS:
-            logging.error(f"{self.name}:Connection: Unknown connection method: {connection_method}")
+        if connectionMethod not in self.ConnectionMethod:
+            logging.error(f"{self.name}:Connection: Unknown connection method: {connectionMethod}")
 
         mav_socket = None
         try:
-            if connection_method == "serial":
+            if connectionMethod == self.ConnectionMethod.serial:
                 mav_socket = mavutil.mavlink_connection(device=device, baud=baud)
             else:
-                mav_socket = mavutil.mavlink_connection('%s:%s:%s' % (connection_method, ip, port))
+                mav_socket = mavutil.mavlink_connection('%s:%s:%s' % (connectionMethod.name, ip, port))
 
             return mav_socket
 
@@ -112,29 +118,27 @@ class EdubotGCS:  # mavwifi.Wifi
             if not self.__is_socket_open.is_set():
                 break
 
-            if time.time() - self._heartbeat_send_time >= self._heartbeat_timeout:
+            if time.time() - self._heartbeat_send_time >= self.__mav_settings.heartbeat_timeout:
                 self._send_heartbeat()
 
             msg = self.mavlink_socket.recv_msg()
             if msg is not None:
-                logging.debug(f"[{self.name}] <Message> {msg}")
-
                 self._last_msg_time = time.time()
                 if not self._is_connected:
                     self._is_connected = True
-                    logging.info(f"[{self.name}] <Connection> connected to robot")
-                if msg.get_type() == 'HEARTBEAT':
+
+                if msg.id == MAVLINK_MSG_ID_HEARTBEAT:
                     pass
-                elif msg.get_type() == 'MISSION_ITEM_REACHED':
+                elif msg.id == MAVLINK_MSG_ID_MISSION_ITEM_REACHED:
                     self._mission_item_reached(msg)
-                elif msg.get_type() == 'COMMAND_ACK':
+                elif msg.id == MAVLINK_MSG_ID_COMMAND_ACK:
                     msg._type += f'_{msg.command}'
 
                 if msg.get_type() in self.wait_msg:
                     self.wait_msg[msg.get_type()].set()
                 self.msg_archive.update({msg.get_type(): {'msg': msg, 'is_read': threading.Event()}})
 
-            elif self._is_connected and (time.time() - self._last_msg_time > self._is_connected_timeout):
+            elif self._is_connected and (time.time() - self._last_msg_time > self.__mav_settings.connected_timeout):
                 self._is_connected = False
                 logging.info(f"[{self.name}] <Connection> disconnected")
 
@@ -162,25 +166,28 @@ class EdubotGCS:  # mavwifi.Wifi
                     confirm += 1
 
                 if in_progress:
-                    event.wait(self._mavlink_send_long_timeout)
+                    event.wait(self.__mav_settings.mavlink_send_long_timeout)
                 else:
-                    event.wait(self._mavlink_send_timeout)
+                    event.wait(self.__mav_settings.mavlink_send_timeout)
 
                 if event.is_set():
                     if_send = False
                     msg = self.msg_archive[msg_to_wait]['msg']
                     self.msg_archive[msg_to_wait]['is_read'].set()
-                    if msg.result == 5:  # IN_PROGRESS
+
+                    if msg.result == MAV_RESULT_IN_PROGRESS:  # IN_PROGRESS
                         in_progress = True
-                        logging.debug(f"[{self.name}] <Ack> {command_name}, result: {EdubotGCS.MAV_RESULT[msg.result]}")
+                        logging.debug(
+                            f"[{self.name}] <Ack> {command_name}, result: {self.__MavResult(msg.result).name}")
                         event.clear()
                     else:
-                        logging.debug(f"[{self.name}] <Ack> {command_name}, result: {EdubotGCS.MAV_RESULT[msg.result]}")
-                        return msg.result in [0, 2]
+                        logging.debug(
+                            f"[{self.name}] <Ack> {command_name}, result: {self.__MavResult(msg.result).name}")
+                        return msg.result in [MAV_RESULT_ACCEPTED, MAV_RESULT_DENIED]
                 else:
                     if_send = True
-                if confirm >= self._mavlink_send_number:
-                    logging.debug(f"[{self.name}] <Ack> {command_name}, result: {EdubotGCS.MAV_RESULT[-1]}")
+                if confirm >= self.__mav_settings.mavlink_send_number:
+                    logging.debug(f"[{self.name}] <Ack> {command_name}, result: {self.__MavResult.SEND_TIMEOUT.name}")
                     return False
         finally:
             if msg_to_wait in self.wait_msg:
@@ -196,22 +203,22 @@ class EdubotGCS:  # mavwifi.Wifi
         event = threading.Event()
         self.wait_msg['POSITION_TARGET_LOCAL_NED'] = event
         try:
-            for confirm in range(self._mavlink_send_number):
+            for confirm in range(self.__mav_settings.mavlink_send_number):
                 self.mavlink_socket.mav.set_position_target_local_ned_send(0, target_system, target_component,
                                                                            coordinate_system,
                                                                            mask, x, y, z, vx, vy, vz, afx, afy, afz,
                                                                            yaw, yaw_rate)
-                event.wait(self._mavlink_send_timeout)
+                event.wait(self.__mav_settings.mavlink_send_timeout)
                 if event.is_set():
                     msg = self.msg_archive['POSITION_TARGET_LOCAL_NED']['msg']
                     self.msg_archive['POSITION_TARGET_LOCAL_NED']['is_read'].set()
                     if msg.type_mask == mask:
-                        logging.debug(f"[{self.name}] <Ack> {command_name}, result: {EdubotGCS.MAV_RESULT[0]}")
+                        logging.debug(f"[{self.name}] <Ack> {command_name}, result: {self.__MavResult.ACCEPTED.name}")
                     else:
-                        logging.debug(f"[{self.name}] <Ack> {command_name}, result: {EdubotGCS.MAV_RESULT[2]}")
+                        logging.debug(f"[{self.name}] <Ack> {command_name}, result: {self.__MavResult.DENIED.name}")
                     return True
 
-            logging.debug(f"[{self.name}] <Ack> {command_name}, result: {EdubotGCS.MAV_RESULT[-1]}")
+            logging.debug(f"[{self.name}] <Ack> {command_name}, result: {self.__MavResult.SEND_TIMEOUT.name}")
             return False
         finally:
             if 'POSITION_TARGET_LOCAL_NED' in self.wait_msg:
@@ -293,11 +300,80 @@ class EdubotGCS:  # mavwifi.Wifi
     def raspberry_poweroff_send(self):
         """ Выключить робота """
         return self._send_command_long(command_name='RPi_POWEROFF',
-                                       command=mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
-                                       target_component=42)
+                                       command=MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+                                       param1=0)
 
     def raspberry_reboot_send(self):
         """ Перезагрузить робота """
         return self._send_command_long(command_name='RPi_REBOOT',
-                                       command=mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
-                                       target_component=43)
+                                       command=MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+                                       param1=1)
+
+    def set_servo(self, num_servo, pwm):
+        """ Управление сервой  """
+        return self._send_command_long(command_name='RPi_REBOOT',
+                                       command=MAV_CMD_DO_SET_SERVO,
+                                       param1=pwm,
+                                       param2=num_servo)
+
+
+    def led_control(self, r=0, g=0, b=0, led_id=255):
+        """ Установить цвет подсветки  """
+        max_value = 255.0
+        all_led = 255
+        first_led = 0
+        last_led = 3
+        led_value = [r, g, b]
+        command = True
+
+        try:
+            if led_id != all_led and (led_id < first_led or led_id > last_led):
+                command = False
+            for i in range(len(led_value)):
+                led_value[i] = float(led_value[i])
+                if led_value[i] > max_value or led_value[i] < 0:
+                    command = False
+                    break
+        except ValueError:
+            command = False
+
+        if command:
+            if led_id == all_led:
+                led_id_print = 'all'
+            else:
+                led_id_print = led_id
+
+            logging.info(f"{self.name} <LED> id: %s R: %i ,G: %i, B: %i send" % (led_id_print, r, g, b))
+            self._send_command_long(
+                0, # command_name
+                mavutil.mavlink.MAV_CMD_USER_1,  # command
+                param1=led_id,  # param1
+                param2=led_value[0],  # param2
+                param3=led_value[1],  # param3
+                param4=led_value[2] , # param4
+                target_system = self.mavlink_socket.target_system,
+                target_component = self.mavlink_socket.target_component
+                )
+        else:
+            logging.error(f"{self.name} <LED> Wrong LED values")
+
+    def led_custom(self, mode=1, timer=0, color1=(0, 0, 0), color2=(0, 0, 0)):
+        param2 = (((color1[0] << 8) | color1[1]) << 8) | color1[2]
+        param3 = (((color2[0] << 8) | color2[1]) << 8) | color2[2]
+
+        self._send_command_long(
+            0,  # command name
+            mavutil.mavlink.MAV_CMD_USER_3,  # command
+            0,  # param1
+            param2,  # param2
+            param3,  # param3
+            0,  # param4
+            param5=mode,  # param5
+            param6=timer, # param6
+            target_system=self.mavlink_socket.target_system,
+            target_component=self.mavlink_socket.target_component
+        )
+
+    def fire_detection(self):
+        """ Мигание красной индикацией """
+        self.led_custom(mode=2, color1=[255, 0, 0], timer=5)

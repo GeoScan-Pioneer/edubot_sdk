@@ -169,8 +169,6 @@ class WaypointsRobot:
         print("exit")
         self.stop()
         self.edubot.Release()
-        sys.exit()
-
 
 class MedianFilter:  # медианный фильтр для фильтрации одиночных выбросов
     history = [-10]
