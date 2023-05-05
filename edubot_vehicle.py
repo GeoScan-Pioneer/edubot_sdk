@@ -235,7 +235,10 @@ class EdubotVehicle:
                                                                msg.type_mask, msg.x, msg.y, 0, 0, 0, 0, 0, 0, 0, 0, 0)
         if not self._vehicle.driving_thread.is_alive():
             self._vehicle.driving_thread.start()
-        self._vehicle.set_target(self.cur_point[0], self.cur_point[1])
+        body_fix = False
+        if msg.coordinate_frame == mavutil.mavlink.MAV_FRAME_BODY_FRD:
+            body_fix = True
+        self._vehicle.set_target(self.cur_point[0], self.cur_point[1], body_fix)
 
 
     def stop(self):
