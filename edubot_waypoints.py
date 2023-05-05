@@ -1,212 +1,291 @@
-#!/usr/bin/env python3.8
-# -*- coding: utf-8 -*-
-
-import edubot2
-from gs_lps import *
+import os
 import sys
-import math
+from pymavlink.dialects.v20.common import *
+from pymavlink import mavutil
 import time
 import threading
+import socket
+import edubot_waypoints2
 import logging
+import led
 
 
-class WaypointsRobot:
-    def __init__(self):
-        self.edubot = edubot2.EduBot(enableDisplay=False)
-        self.edubot.Start()
-        logging.basicConfig(level=logging.CRITICAL)
-        self._time_start = time.time()
-        self._battery_watch_timer = time.time()
-        self._nav = us_nav()
-        self._nav.start()
+class EdubotVehicle:
+    """Edubot vehicle class"""
+    MAV_RESULT = {
+        -1: 'SEND_TIMEOUT',
+        0 : 'ACCEPTED',
+        1 : 'TEMPORARILY_REJECTED',
+        2 : 'DENIED',
+        3 : 'UNSUPPORTED',
+        4 : 'FAILED',
+        5 : 'IN_PROGRESS',
+        6 : 'CANCELLED'
+    }
 
-        self._telemetery_update_timeout = 0.005
-        self._telemetery_update_time = time.time() - self._telemetery_update_timeout
-        self._telemetery_alive_timeout = 1
-        self._telemetery_get_time = time.time() - self._telemetery_alive_timeout
+    _SUPPORTED_CONNECTION_METHODS = ['serial', 'udpin', "udpout"]
 
-        self._telemetery_thread = threading.Thread(target=self._update_coordinates)
-        self._telemetery_thread.start()
+    def __init__(self, name='EdubotVehicle', ip=None, mavlink_port=5656, connection_method='udpin',
+                 device='/dev/serial0', baud=115200, logging_level='INFO'):
 
-        self.filters = [MedianFilter(), MedianFilter(), MedianFilter()]
+        self.name = name
+        if ip is None:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(('10.255.255.255', 1))
+                ip = s.getsockname()[0]
+            except:
+                ip = '127.0.0.1'
+            finally:
+                s.close()
+        print(f"[{self.name}] <Connection> robot IP: {ip}")
 
-        self.x = 0
-        self.y = 0
-        self.yaw = 0
+        self._vehicle = edubot_waypoints2.WaypointsRobot()
+        self._led = led.Led()
 
-    def go_to_local_point(self, x_target, y_target, driving):  # доехать до точки с заданными координатами
-        if _check_dist_in_circle((self.x, self.y), (x_target, y_target), 0.3):
-            self.edubot.Beep()
-            logging.info("Point is reached")
-            return True
+        self._is_connected = False
+        self._is_connected_timeout = 1
+        self._last_msg_time = time.time() - self._is_connected_timeout
 
-        result_1 = self._rotate_to_target(x_target, y_target, driving)
-        result_2 = self._straight_to_target(x_target, y_target, driving)
+        self._heartbeat_timeout = 1
+        self._heartbeat_send_time = time.time() - self._heartbeat_timeout
 
-        if result_2 and result_1:
-            self.edubot.Beep()
-            logging.info("Point is reached")
-            return True
-        return False
+        self._telemetery_timeout = 1
+        self._telemetery_send_time = time.time() - self._telemetery_timeout
 
-    def go_to_local_point_body_fixed(self, dx, dy,
-                                     driving):  # доехать до точки с заданным смещением относительно текущей позиции
-        x, y, yaw = self.x, self.y, self.yaw
-        return self.go_to_local_point(x + dx, y + dy, driving)
+        self._point_seq = 0
+        self._point_seq_timeout = 1
+        self._point_seq_send_time = time.time() - self._point_seq_timeout
 
-    def _rotate_to_target(self, x_target, y_target, is_driving, kp=20, ki=0, kd=0, angle_accuracy=0.2):  # повернуться в сторону заданной точки
-        e_prev = 0
-        e_sum = 0
-        x, y, yaw = self.x, self.y, self.yaw
-        angle = _normalize_angle(math.atan2(y_target - y, x_target - x) - yaw)
-        while abs(angle) > angle_accuracy:
-            if not is_driving.is_set():
-                self.stop()
-                return False
-            self._check_battery()
-            x, y, yaw = self.x, self.y, self.yaw
-            angle = _normalize_angle(math.atan2(y_target - y, x_target - x) - yaw)
-            e_sum += angle
-            e_sum = _saturate(e_sum, 10)
-            u_s = 0
-            u_r = _saturate(kp * angle + e_sum * ki + kd * (angle - e_prev), 50)
-            self._set_speed(u_s + u_r, u_s - u_r)
-            logging.debug(x, y, yaw, u_s, u_r)
-            e_prev = angle
-        self.stop()
-        return True
+        self._is_driving = threading.Event()
+        self.__is_go_to_point = threading.Event()
+        self.__is_go_to_point.clear()
+        self._driving_thread = None
 
-    def _straight_to_target(self, x_target, y_target, is_driving, kp=32, ki=0, kd=0, dist_accuracy=0.2, speed_max = 80,
-                            dist_speedup=0.05, dist_slowdown=0.3):  # движение в точку с динамической коррекцией угла
-        e_prev = 0
-        e_sum = 0
-        x, y, yaw = self.x, self.y, self.yaw
-        x_start, y_start = x, y
-        dist = math.dist((x, y), (x_target, y_target))
-        while dist > dist_accuracy:
-            if not is_driving.is_set():
-                self.stop()
-                return False
-            self._check_battery()
+        self._mavlink_send_timeout = 0.5
+        self._mavlink_send_long_timeout = 1
+        self._mavlink_send_number = 10
 
-            x, y, yaw = self.x, self.y, self.yaw
-            dist = math.dist((x, y), (x_target, y_target))
-            dist_start = dist = math.dist((x, y), (x_start, y_start))
-            angle = _normalize_angle(math.atan2(y_target - y, x_target - x) - yaw)
+        self.mavlink_socket = self._create_connection(connection_method=connection_method,
+                                                      ip=ip, port=mavlink_port,
+                                                      device=device, baud=baud)
+        self.__is_socket_open = threading.Event()
+        self.__is_socket_open.set()
 
-            if dist_start < dist_speedup:
-                u_s = speed_max * (dist_start / dist_speedup)  # разгон на старте
-            elif dist < dist_slowdown:
-                u_s = speed_max * (dist / dist_slowdown) * 2   # замедление на финише
+        self.msg_archive = dict()
+        self.wait_msg = dict()
+
+        self.command_long_handler = {
+            MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN: lambda msg: self._raspberry_reboot_shutdown(msg),
+            MAV_CMD_DO_SET_SERVO             : lambda msg: self.__handler_cmd_do_set_servo(msg),
+            MAV_CMD_USER_1                   : lambda msg: self.__handler_led(msg),
+            MAV_CMD_USER_3                   : lambda msg: self.__handler_led(msg)
+        }
+
+        self._message_handler_thread = threading.Thread(
+                target=self._message_handler, daemon=True)
+        self._message_handler_thread.daemon = True
+        self._message_handler_thread.start()
+
+        logging.info(f"[{self.name}] <Connection> connecting to station...")
+        # mavwifi.Wifi.__init__(self, self.mavlink_socket)
+
+        # fixme сомнительные переменные
+        self.cur_point = []
+
+    def __del__(self):
+        logging.debug(f"[{self.name}] <Object> Class object removed")
+
+    def _create_connection(self, connection_method, ip, port, device, baud):
+        """
+        create mavlink connection
+        :return: mav_socket
+        """
+        if connection_method not in self._SUPPORTED_CONNECTION_METHODS:
+            logging.error(
+                    f"[{self.name}] <Connection> Unknown connection method: {connection_method}")
+
+        mav_socket = None
+        try:
+            if connection_method == "serial":
+                mav_socket = mavutil.mavlink_connection(
+                        device=device, baud=baud)
             else:
-                u_s = speed_max                                # движение с максимально возможной линейной скоростью + коррекция угла
+                mav_socket = mavutil.mavlink_connection(
+                        '%s:%s:%s' % (connection_method, ip, port))
+                mav_socket.mav.mission_item_reached_send(0)
 
-            e_sum += angle
-            e_sum = _saturate(e_sum, 10)
-            u_r = (kp * angle + kd * (angle - e_prev) + e_sum * ki) * _saturate(min(dist, dist_start) * 10, 1)
-            self._set_speed(u_s + u_r, u_s - u_r)
+            return mav_socket
 
-            logging.debug(x, y, yaw, u_s, u_r)
-            e_prev = angle
-            time.sleep(0.025)
-        self.stop()
-        return True
+        except socket.error as e:
+            logging.error(
+                    f"[{self.name}] <Connection> Connection error. Can not connect to station: {e}")
 
-    def _check_battery(self):
-        if time.time() - self._battery_watch_timer >= 5:  # проверка заряда каждые 5 секунд
-            voltage = self.edubot.GetPowerData()[0]
-            self.battery_watch_timer = time.time()
-            if voltage <= 6.6:
-                print("low battery")
-                self.stop()
-                self.edubot.Beep()
-                self.exit_program()
+    def close_connection(self):
+        """
+        Close mavlink connection
+        :return: None
+        """
+        self.__is_socket_open.clear()
+        self._message_handler_thread.join()
+        self.mavlink_socket.close()
+        logging.error(f"[{self.name}] <Connection> Mavlink socket closed")
 
-    def _set_speed(self, left, right):
-        left, right = _saturate(left, 100), _saturate(right, 100)
-        self.edubot.rightMotor.SetParrot(round(right))
-        self.edubot.leftMotor.SetParrot(round(-left))
+    def connected(self):
+        """
+        Check if vehicle is connected
+        :return: Bool
+        """
+        return self._is_connected
 
-    def servo(self, pwm):
-        pass
+    def _send_heartbeat(self):
+        self.mavlink_socket.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_GROUND_ROVER,
+                                               mavutil.mavlink.MAV_AUTOPILOT_GENERIC_WAYPOINTS_ONLY, 0, 0, 0)
+        self._heartbeat_send_time = time.time()
 
-    def _update_coordinates(self):  # получение координат и угла рыскания с локуса
+    def _message_handler(self):
         while True:
-            if time.time() - self._telemetery_update_time > self._telemetery_update_timeout:
-                if time.time() - self._telemetery_get_time > self._telemetery_alive_timeout:
-                    print("Error getting coords from lokus")
-                    self._telemetery_get_time = time.time()
-                elif time.time() - self._telemetery_update_time > self._telemetery_alive_timeout:
-                    print(f'x: {self.x}, y: {self.y}, yaw: {self.yaw}')
+            if not self.__is_socket_open.is_set():
+                break
 
-                pos = self._nav.get_position()
-                angles = self._nav.get_angles()
+            if time.time() - self._heartbeat_send_time >= self._heartbeat_timeout:
+                self._send_heartbeat()
+            if time.time() - self._telemetery_send_time >= self._telemetery_timeout:
+                self._attitude_send()
+                self._local_position_ned_send()
+            if time.time() - self._point_seq_send_time >= self._point_seq_timeout:
+                self._mission_item_reached_send()
 
-                if pos is not None and angles is not None and pos[0] != 0 and pos[1] != 0:
-                    self._telemetery_update_time = time.time()
-                    self._telemetery_get_time = time.time()
-                    x, y = pos[0], pos[1]
-                    yaw = angles[2] + 3.14  # поворот системы координат
-                    x, y, yaw = self.filters[0].filter(x), self.filters[1].filter(y), self.filters[2].filter(yaw)
-                    self.x, self.y, self.yaw = x, y, yaw
+            msg = self.mavlink_socket.recv_msg()
+            if msg is not None:
+                # print(f"[{self.name}] <Message> {msg}")
 
-    def get_local_position(self):
-        x, y, yaw = self.x, self.y, self.yaw
-        return [x, y, 0]
+                if msg.id == MAVLINK_MSG_ID_COMMAND_LONG:
+                    print(f'COMMAND LONG: {msg.command}')
+                    self._send_ack(msg.command, 0)
+                    self.command_long_handler[msg.command](msg)
 
-    def get_attitude(self):
-        x, y, yaw = self.x, self.y, self.yaw
-        return [0, 0, yaw]
+                self._last_msg_time = time.time()
+                if not self._is_connected:
+                    self._is_connected = True
+                    logging.info(
+                            f"[{self.name}] <Connection> connected to station")
+
+                if msg.id == MAVLINK_MSG_ID_HEARTBEAT:
+                    pass
+
+                elif msg.id == MAVLINK_MSG_ID_COMMAND_ACK:
+                    msg._type += f'_{msg.command}'
+
+                elif msg.id == MAVLINK_MSG_ID_SET_POSITION_TARGET_LOCAL_NED:  # команда ехать в точку
+                    if len(self.cur_point) != 0:
+                        if self.cur_point[0] == msg.x and self.cur_point[1] == msg.y:
+                            self.mavlink_socket.mav.position_target_local_ned_send(0, msg.coordinate_frame,
+                                                                                   msg.type_mask, msg.x, msg.y, 0, 0, 0,
+                                                                                   0, 0, 0, 0, 0, 0)
+                            continue
+                        else:
+                            self.cur_point = [msg.x, msg.y]
+                    else:
+                        self.cur_point = [msg.x, msg.y]
+
+                    self._go_to_local_point(msg, self._is_driving)
+
+                if msg.get_type() in self.wait_msg:  # если находится в листе ожидания (например, ack)
+                    self.wait_msg[msg.get_type()].set()  # триггерим Event
+
+                self.msg_archive.update(
+                        {msg.get_type(): {'msg': msg, 'is_read': threading.Event()}})
+
+            elif self._is_connected and (time.time() - self._last_msg_time > self._is_connected_timeout):
+                self._is_connected = False  # если
+                logging.info(f"[{self.name}] <Connection> disconnected")
+
+        logging.info(f"[{self.name}] <Object> message handler stopped")
+
+    def _sys_status_send(self):  # msgname = "SYS_STATUS"
+        self.mavlink_socket.mav.sys_status_send()
+
+    # def _battery_status_send(self):
+    #     voltages = self._vehicle.get_battery_status()
+    #     self.mavlink_socket.mav.battery_status_send(0, 0, 0, 0, voltages, 0, 0, 0, 0)
+
+    def _attitude_send(self):
+        att = self._vehicle.get_attitude()
+        self.mavlink_socket.mav.attitude_send(
+                0, att[0], att[1], att[2], 0, 0, 0)
+        self._telemetery_send_time = time.time()
+
+    def _local_position_ned_send(self):
+        pos = self._vehicle.get_local_position()
+        self.mavlink_socket.mav.local_position_ned_send(
+                0, pos[0], pos[1], pos[2], 0, 0, 0)
+        self._telemetery_send_time = time.time()
+
+    def _mission_item_reached_send(self):
+        self.mavlink_socket.mav.mission_item_reached_send(self._vehicle.reached_points)
+        self._point_seq_send_time = time.time()
+
+    def _send_ack(self, command, status):
+        self.mavlink_socket.mav.command_ack_send(command, status)
+
+    def _go_to_local_point(self, msg, event):
+        # time_boot_ms, coordinate_frame, type_mask, x, y, z, vx, vy, vz, afx, afy, afz, yaw, yaw_rate
+        self.mavlink_socket.mav.position_target_local_ned_send(0, msg.coordinate_frame,
+                                                               msg.type_mask, msg.x, msg.y, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        if not self._vehicle.driving_thread.is_alive():
+            self._vehicle.driving_thread.start()
+        self._vehicle.set_target(self.cur_point[0], self.cur_point[1])
+
 
     def stop(self):
-        self._set_speed(0, 0)
+        self._vehicle.stop()
 
-    def get_battery_status(self):
-        voltage, current, power = self.edubot.GetPowerData()
-        return [voltage, current, power]
+    def _raspberry_reboot_shutdown(self, msg):  # мб новый поток
+        self._vehicle.exit_program()
+        time.sleep(2)
+        if msg.param1 == 0:
+            os.system("sudo shutdown now")
+        elif msg.param1 == 1:
+            os.system("sudo reboot now")
 
-    def exit_program(self):
-        print("exit")
-        self.stop()
-        self.edubot.Release()
+    def __handler_cmd_do_set_servo(self, msg):
+        """
+            Обработка команды MAV_CMD_DO_SET_SERVO
+        :param msg:
+        :return:
+        """
+        pwm = msg.param1
+        servo = msg.param2
+        print(f'PWM {pwm}')
+        print(f'Servo {servo}')
+        self._vehicle.servo(pwm)
 
-class MedianFilter:  # медианный фильтр для фильтрации одиночных выбросов
-    history = [-10]
+    def __handler_led(self, msg):
+        if msg.command == mavutil.mavlink.MAV_CMD_USER_1:  # led control
+            try:
+                self._led.handler_led_control(msg)
+                self._send_ack(msg.command, 0)
+            except KeyboardInterrupt:
+                print('exit')
+                sys.exit()
 
-    def filter(self, x):
-        self.history.append(x)
-        while len(self.history) > 3:
-            self.history.pop(0)
-        return sorted(self.history)[1]
-
-
-def _saturate(value, limit):  # ограничение значения отрезком [-limit; limit]
-    limit = abs(limit)
-    if value < -limit:
-        return -limit
-    elif value > limit:
-        return limit
-    else:
-        return value
-
-
-def _normalize_angle(angle):
-    while angle < -math.pi:
-        angle += 2 * math.pi
-    while angle > math.pi:
-        angle -= 2 * math.pi
-    return angle
-
-
-def _check_dist_in_circle(p1, p2, dist):
-    d = math.dist(p1, p2)
-    return True if d < dist else False
+        elif msg.command == mavutil.mavlink.MAV_CMD_USER_3:  # led custom
+            try:
+                self._led.handler_led_custom(msg)
+                self._send_ack(msg.command, 0)
+            except KeyboardInterrupt:
+                print('exit')
+                sys.exit()
 
 
 if __name__ == "__main__":
-    robot = WaypointsRobot()
-    is_driving = threading.Event()
-    is_driving.set()
-    if sys.argv[1] and sys.argv[2]:
-        x_target, y_target = float(sys.argv[1]), float(sys.argv[2])
-        robot.go_to_local_point(x_target, y_target, is_driving)
+    robot = EdubotVehicle()
+    try:
+        robot._led._set_color_rgb(255, 255, 255)
+        time.sleep(1)
+        robot._led._set_color_rgb(0, 0, 0)
+        while True:
+            pass
+    except KeyboardInterrupt:
+        sys.exit()
