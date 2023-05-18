@@ -1,7 +1,7 @@
 #!/usr/bin/env python3.8
 # -*- coding: utf-8 -*-
+import dataclasses
 import logging
-
 import edubot2
 from gs_lps import *
 import sys
@@ -10,11 +10,31 @@ import time
 import threading
 
 # коэффициенты для edubot
-DIST_ACCURACY = 0.25
-ANGLE_ACCURACY = 0.2
-SPEED_MAX = 230
-dist_speedup = 0.1
+KP = 25  # ref 32
+KI = 0
+KD = 0  # ref 2.5
+KP_2 = 20  # ref 20
+KI_2 = 0  # ref 2
+KD_2 = 0
+DIST_ACCURACY = 0.2  # ref 0.05
+ANGLE_ACCURACY = 0.1  # ref: 0.03
+SPEED_MAX = 80
 INT_SUM_LIMIT = 10
+
+dist_speedup = 0.1
+dist_slowdown = 0.3
+
+
+@dataclasses.dataclass
+class Point:
+    """
+    Класс для описания точек
+    """
+
+    def __init__(self, x=0.0, y=0.0, yaw=0.0):
+        self.x = x
+        self.y = y
+        self.yaw = yaw
 
 
 class WaypointsRobot:
@@ -27,7 +47,7 @@ class WaypointsRobot:
         self._nav = us_nav()
         self._nav.start()
 
-        self._telemetery_update_timeout = 0.05
+        self._telemetery_update_timeout = 0.025
         self._telemetery_update_time = time.time() - self._telemetery_update_timeout
         self._telemetery_alive_timeout = 1
         self._telemetery_get_time = time.time() - self._telemetery_alive_timeout
@@ -36,9 +56,7 @@ class WaypointsRobot:
         self._y_filter = MedianFilter()
         self._yaw_filter = MedianFilter()
 
-        self.x = 0
-        self.y = 0
-        self.yaw = 0
+        self.cur_coord = Point()
 
         self._telemetery_thread = threading.Thread(target=self._update_coordinates)
         self._telemetery_thread.start()
@@ -53,85 +71,73 @@ class WaypointsRobot:
         self.reached_points = 0
 
     def set_target(self, x, y, body_fixed=False):
-        self.cur_target = [x, y]
-        if body_fixed is True:
-            self.cur_target = [self.x+x, self.y+y]
+        if body_fixed:
+            self.cur_target = Point(self.cur_coord.x + x, self.cur_coord.y + y, 0)
+        else:
+            self.cur_target = Point(x, y, 0)
 
-
-    def go_to_local_point(self, KP=200, KD=1, KI=15):
+    def go_to_local_point(self):
         """Движение в точку с динамической коррекцией угла
-
-        Args:
-            x_target (_type_): _description_
-            y_target (_type_): _description_
-            KP (int, optional): _description_. Defaults to 2000.
-            KD (int, optional): _description_. Defaults to 10.
-            KI (int, optional): _description_. Defaults to 25.
         """
 
         # print(f'target: {x_target}, {y_target}')
         int_sum = 0
         e_prev = 0
-        x_target = 0
-        y_target = 0
-
+        point_to_go = Point()
+        point_start = Point()
         while True:
+            time.sleep(0.05)
             if self.cur_target is None:
                 continue
-            if self.cur_target[0] != x_target or self.cur_target[1] != y_target: # если обнаружили, что точка изменилась
+            elif self.cur_target.x != point_to_go.x or self.cur_target.y != point_to_go.y:  # обнаружили, что цель изменилась
+                print("new point")
                 self.new_point.set()
                 self.point_reached.clear()
-                x_target = self.cur_target[0] # обновить координаты
-                y_target = self.cur_target[1]
-            x, y, yaw = self.x, self.y, self.yaw
-            dist = math.sqrt((x_target - x) ** 2 + (y_target - y) ** 2)
-            if dist <= DIST_ACCURACY and not self.new_point.is_set() and not self.point_reached.is_set(): # если мы уже в точке и она не отмечена достигнутой и не была задана новая
+                point_to_go = self.cur_target
+
+            dist = self.dist_to(point_to_go)
+            print(dist)
+
+            if self.point_reached.is_set():
                 self.stop()
-                self.point_reached.set() # отметить, что достигли последнюю (нужно чтобы зайти в это условие 1 раз)
-                self.reached_points += 1
                 continue
             elif dist <= DIST_ACCURACY:
+                self.stop()
+                self.point_reached.set()  # (нужно чтобы зайти в это условие 1 раз)
+                self.reached_points += 1
+                print("point_reached")
                 continue
-            if self.new_point.is_set():    # если точка сменилась
-                self.point_reached.clear() # новую точку еще не достигли
-                self.new_point.clear()     # новую точку прочитали и она уже не новая
-                self.stop()                # остановить движение
-                self.rotate_to_target2(x_target, y_target)   # довернуться до новой точки
-                continue
-            angle = normalize_angle(math.atan2(
-                    y_target - y, x_target - x) - yaw)
-            int_sum += angle
-            int_sum = saturate(int_sum, INT_SUM_LIMIT)
 
-            u_s = SPEED_MAX
-            u_r = (KP * angle + KD * (angle - e_prev) + KI * int_sum)
-            u_r_min = 80
-            if u_r > u_r_min:
-                self._set_speed(u_s, u_s - u_r)
-            elif u_r < u_r_min:
-                self._set_speed(u_s + u_r, u_s)
+            if self.new_point.is_set():  # если обнаружена новая точка, повернуть
+                self.new_point.clear()
+                self.stop()
+                self.rotate_to(point_to_go)  # rotate должен быть позже проверки на point_reached
+                continue
+            angle = self.angle_to(point_to_go)
+            dist_start = self.dist_to(point_start)
+            if dist_start < dist_speedup:
+                u_s = SPEED_MAX * (dist_start / dist_speedup)  # разгон на старте
+            elif dist < dist_slowdown:
+                u_s = SPEED_MAX * (dist / dist_slowdown)  # замедление на финише
             else:
-                self._set_speed(SPEED_MAX, SPEED_MAX)
-            # self.set_speed(u_s + u_r, u_s - u_r)
+                u_s = SPEED_MAX  # движение с максимально возможной линейной скоростью + коррекция угла
+            e_sum = saturate(int_sum + angle, 10)
+            u_r = (KP * angle + KD * (angle - e_prev) + e_sum * KI)
             e_prev = angle
-            # print(x, y, angle, u_s, u_r)
-        self._set_speed(0, 0)
+            self._set_speed(u_s + u_r, u_s - u_r)
+            logging.debug(self.cur_coord, angle, u_s, u_r)
         return True
 
-    def rotate_to_target2(self, x_target, y_target, KP=150, KD=1, KI=17):
+    def rotate_to(self, point_to_go: Point):
         e_prev = 0
         int_sum = 0
         angle = ANGLE_ACCURACY + 1
         while abs(angle) > ANGLE_ACCURACY:
-            x, y, yaw = self.x, self.y, self.yaw
-            angle = normalize_angle(math.atan2(
-                    y_target - y, x_target - x) - yaw)
-
-            int_sum += angle
-            int_sum = saturate(int_sum, INT_SUM_LIMIT)
-            u_r = KP * angle + KD * (angle - e_prev) + KI * int_sum
+            angle = self.angle_to(point_to_go)
+            int_sum = saturate(int_sum + angle, INT_SUM_LIMIT)
+            u_r = saturate(KP_2 * angle + KD_2 * (angle - e_prev) + KI_2 * int_sum, 50)
             self._set_speed(u_r, - u_r)
-            print(x, y, angle, u_r)
+            print(self.cur_coord, angle, u_r)
             e_prev = angle
         self._set_speed(0, 0)
         return True
@@ -147,34 +153,28 @@ class WaypointsRobot:
                     self._telemetery_update_time = time.time()
                     self._telemetery_get_time = time.time()
                     x, y = pos[0], pos[1]
-                    yaw = angles[2]# поворот системы координат
-                    # x, y, yaw = self._x_filter.filter(x), self._y_filter.filter(y), self._yaw_filter.filter(yaw)
-                    self.x, self.y, self.yaw = x, y, yaw
-                    # print(f'x: {self.x}, y: {self.y}, yaw: {self.yaw}')
+                    yaw = angles[2] - math.pi  # поворот системы координат
+                    x, y, yaw = self._x_filter.filter(x), self._y_filter.filter(y), self._yaw_filter.filter(yaw)
+                    self.cur_coord = Point(x, y, yaw)
 
                 if time.time() - self._telemetery_get_time > self._telemetery_alive_timeout:
                     print("Одиночная ошибка получения координат с локуса")
                     self._telemetery_get_time = time.time()
                 elif time.time() - self._telemetery_update_time > self._telemetery_alive_timeout:
-                    #print(f'x: {self.x}, y: {self.y}, yaw: {self.yaw}')
+                    # print(f'x: {self.x}, y: {self.y}, yaw: {self.yaw}')
                     pass
 
-
     def get_local_position(self):
-        x, y, yaw = self.x, self.y, self.yaw
-        return [x, y, 0]
+        return [self.cur_coord.x, self.cur_coord.y, 0]
 
     def get_attitude(self):
-        x, y, yaw = self.x, self.y, self.yaw
-        return [0, 0, yaw]
+        return [0, 0, self.cur_coord.yaw]
 
     def _set_speed(self, left, right):
-        left = round(saturate(left, 240))
-        right = round(saturate(right, 240))
-        # print(left, right)
-        self.edubot.rightMotor.SetSpeed(right)
-        self.edubot.leftMotor.SetSpeed(left)
-
+        left = round(saturate(left, 100))
+        right = round(saturate(right, 100))
+        self.edubot.rightMotor.SetParrot(right)
+        self.edubot.leftMotor.SetParrot(-left)
 
     def _check_battery(self):
         if time.time() - self._battery_watch_timer >= 5:  # проверка заряда каждые 5 секунд
@@ -203,6 +203,12 @@ class WaypointsRobot:
 
     def servo(self, pwm):
         self.edubot.servo(pwm)
+
+    def dist_to(self, point: Point):
+        return math.sqrt((self.cur_coord.x - point.x) ** 2 + (self.cur_coord.y - point.y) ** 2)
+
+    def angle_to(self, point: Point):
+        return normalize_angle(math.atan2(point.y - self.cur_coord.y, point.x - self.cur_coord.x) - self.cur_coord.yaw)
 
 
 class MedianFilter:  # медианный фильтр для фильтрации одиночных выбросов
@@ -239,12 +245,15 @@ if __name__ == "__main__":
         is_driving.set()
         robot = WaypointsRobot()
 
-        line = [(-0, 0),
-                (3, 3),
-                (-4.2, 0.4)]
+        line = [Point(-0, 0),
+                Point(3, 3),
+                Point(-4.2, 0.4)]
 
-        for dot in line:
-            robot.go_to_local_point(dot[0], dot[1], is_driving)
+        for p in line:
+            robot.set_target(p.x, p.y)
+            robot.go_to_local_point()
+            while not robot.point_reached:
+                pass
             robot.beep()
 
     except KeyboardInterrupt:

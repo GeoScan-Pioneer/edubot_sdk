@@ -1,5 +1,5 @@
-import os
-import sys
+import dataclasses
+import enum
 from pymavlink.dialects.v20.common import *
 from pymavlink import mavutil
 import time
@@ -12,23 +12,37 @@ import led
 
 class EdubotVehicle:
     """Edubot vehicle class"""
-    MAV_RESULT = {
-        -1: 'SEND_TIMEOUT',
-        0 : 'ACCEPTED',
-        1 : 'TEMPORARILY_REJECTED',
-        2 : 'DENIED',
-        3 : 'UNSUPPORTED',
-        4 : 'FAILED',
-        5 : 'IN_PROGRESS',
-        6 : 'CANCELLED'
-    }
 
-    _SUPPORTED_CONNECTION_METHODS = ['serial', 'udpin', "udpout"]
+    class __MavResult(enum.Enum):
+        SEND_TIMEOUT = -1
+        ACCEPTED = MAV_RESULT_ACCEPTED
+        TEMPORARILY_REJECTED = MAV_RESULT_TEMPORARILY_REJECTED
+        DENIED = MAV_RESULT_DENIED
+        UNSUPPORTED = MAV_RESULT_UNSUPPORTED
+        FAILED = MAV_RESULT_FAILED
+        IN_PROGRESS = MAV_RESULT_IN_PROGRESS
+        CANCELLED = 6
 
-    def __init__(self, name='EdubotVehicle', ip=None, mavlink_port=5656, connection_method='udpin',
+    class ConnectionMethod(enum.Enum):
+        updin = 0
+        udpout = 1
+        serial = 2
+
+    @dataclasses.dataclass
+    class __MavSettings:
+        connected_timeout: float = 1  # таймаут для принятия решения о потере соединения
+        heartbeat_timeout: float = 1  # таймаут для отправки heartbeat
+        telemetery_timeout: float = 0.5
+        point_seq_timeout: float = 0.5
+        mavlink_send_timeout: float = 0.5
+        mavlink_send_long_timeout: float = 1
+        mavlink_send_number: int = 10  # кол-во попыток отпрвки command_long
+
+    def __init__(self, name='EdubotVehicle', ip=None, mavlink_port=5656, connection_method=ConnectionMethod.udpout,
                  device='/dev/serial0', baud=115200, logging_level='INFO'):
 
         self.name = name
+        self.__mav_settings = self.__MavSettings()
         if ip is None:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
@@ -40,31 +54,20 @@ class EdubotVehicle:
                 s.close()
         print(f"[{self.name}] <Connection> robot IP: {ip}")
 
-        self._vehicle = edubot_waypoints2.WaypointsRobot()
+        self._vehicle = edubot_waypoints.WaypointsRobot()
         self._led = led.Led()
 
         self._is_connected = False
-        self._is_connected_timeout = 1
-        self._last_msg_time = time.time() - self._is_connected_timeout
+        self._last_msg_time = time.time() - self.__mav_settings.connected_timeout
 
-        self._heartbeat_timeout = 1
-        self._heartbeat_send_time = time.time() - self._heartbeat_timeout
+        self._heartbeat_send_time = time.time() - self.__mav_settings.heartbeat_timeout
 
-        self._telemetery_timeout = 1
-        self._telemetery_send_time = time.time() - self._telemetery_timeout
+        self._telemetery_send_time = time.time() - self.__mav_settings.telemetery_timeout
 
         self._point_seq = 0
-        self._point_seq_timeout = 1
-        self._point_seq_send_time = time.time() - self._point_seq_timeout
+        self._point_seq_send_time = time.time() - self.__mav_settings.point_seq_timeout
 
-        self._is_driving = threading.Event()
-        self.__is_go_to_point = threading.Event()
-        self.__is_go_to_point.clear()
         self._driving_thread = None
-
-        self._mavlink_send_timeout = 0.5
-        self._mavlink_send_long_timeout = 1
-        self._mavlink_send_number = 10
 
         self.mavlink_socket = self._create_connection(connection_method=connection_method,
                                                       ip=ip, port=mavlink_port,
@@ -76,7 +79,7 @@ class EdubotVehicle:
         self.wait_msg = dict()
 
         self.command_long_handler = {
-            MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN: lambda msg: self._raspberry_reboot_shutdown(msg),
+            MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN: lambda msg: self.__handler_raspberry_reboot_shutdown(msg),
             MAV_CMD_DO_SET_SERVO             : lambda msg: self.__handler_cmd_do_set_servo(msg),
             MAV_CMD_USER_1                   : lambda msg: self.__handler_led(msg),
             MAV_CMD_USER_3                   : lambda msg: self.__handler_led(msg)
@@ -88,9 +91,7 @@ class EdubotVehicle:
         self._message_handler_thread.start()
 
         logging.info(f"[{self.name}] <Connection> connecting to station...")
-        # mavwifi.Wifi.__init__(self, self.mavlink_socket)
 
-        # fixme сомнительные переменные
         self.cur_point = []
 
     def __del__(self):
@@ -101,7 +102,7 @@ class EdubotVehicle:
         create mavlink connection
         :return: mav_socket
         """
-        if connection_method not in self._SUPPORTED_CONNECTION_METHODS:
+        if connection_method not in self.ConnectionMethod:
             logging.error(
                     f"[{self.name}] <Connection> Unknown connection method: {connection_method}")
 
@@ -148,22 +149,22 @@ class EdubotVehicle:
             if not self.__is_socket_open.is_set():
                 break
 
-            if time.time() - self._heartbeat_send_time >= self._heartbeat_timeout:
+            if time.time() - self._heartbeat_send_time >= self.__mav_settings.heartbeat_timeout:
                 self._send_heartbeat()
-            if time.time() - self._telemetery_send_time >= self._telemetery_timeout:
+            if time.time() - self._telemetery_send_time >= self.__mav_settings.telemetery_timeout:
                 self._attitude_send()
                 self._local_position_ned_send()
-            if time.time() - self._point_seq_send_time >= self._point_seq_timeout:
+            if time.time() - self._point_seq_send_time >= self.__mav_settings.point_seq_timeout:
                 self._mission_item_reached_send()
 
             msg = self.mavlink_socket.recv_msg()
             if msg is not None:
-                # print(f"[{self.name}] <Message> {msg}")
-
                 if msg.id == MAVLINK_MSG_ID_COMMAND_LONG:
-                    print(f'COMMAND LONG: {msg.command}')
-                    self._send_ack(msg.command, 0)
-                    self.command_long_handler[msg.command](msg)
+                    if msg.command in self.command_long_handler:
+                        self._send_ack(msg.command, self.__MavResult.ACCEPTED)
+                        self.command_long_handler[msg.command](msg)
+                    else:
+                        self._send_ack(msg.command, self.__MavResult.DENIED)
 
                 self._last_msg_time = time.time()
                 if not self._is_connected:
@@ -178,18 +179,7 @@ class EdubotVehicle:
                     msg._type += f'_{msg.command}'
 
                 elif msg.id == MAVLINK_MSG_ID_SET_POSITION_TARGET_LOCAL_NED:  # команда ехать в точку
-                    if len(self.cur_point) != 0:
-                        if self.cur_point[0] == msg.x and self.cur_point[1] == msg.y:
-                            self.mavlink_socket.mav.position_target_local_ned_send(0, msg.coordinate_frame,
-                                                                                   msg.type_mask, msg.x, msg.y, 0, 0, 0,
-                                                                                   0, 0, 0, 0, 0, 0)
-                            continue
-                        else:
-                            self.cur_point = [msg.x, msg.y]
-                    else:
-                        self.cur_point = [msg.x, msg.y]
-
-                    self._go_to_local_point(msg, self._is_driving)
+                    self.__handler_go_to_local_point(msg)
 
                 if msg.get_type() in self.wait_msg:  # если находится в листе ожидания (например, ack)
                     self.wait_msg[msg.get_type()].set()  # триггерим Event
@@ -197,8 +187,8 @@ class EdubotVehicle:
                 self.msg_archive.update(
                         {msg.get_type(): {'msg': msg, 'is_read': threading.Event()}})
 
-            elif self._is_connected and (time.time() - self._last_msg_time > self._is_connected_timeout):
-                self._is_connected = False  # если
+            elif self._is_connected and (time.time() - self._last_msg_time > self.__mav_settings.connected_timeout):
+                self._is_connected = False
                 logging.info(f"[{self.name}] <Connection> disconnected")
 
         logging.info(f"[{self.name}] <Object> message handler stopped")
@@ -206,9 +196,9 @@ class EdubotVehicle:
     def _sys_status_send(self):  # msgname = "SYS_STATUS"
         self.mavlink_socket.mav.sys_status_send()
 
-    # def _battery_status_send(self):
-    #     voltages = self._vehicle.get_battery_status()
-    #     self.mavlink_socket.mav.battery_status_send(0, 0, 0, 0, voltages, 0, 0, 0, 0)
+    def _battery_status_send(self):
+        voltages = self._vehicle.get_battery_status()
+        self.mavlink_socket.mav.battery_status_send(0, 0, 0, 0, voltages, 0, 0, 0, 0)
 
     def _attitude_send(self):
         att = self._vehicle.get_attitude()
@@ -229,10 +219,22 @@ class EdubotVehicle:
     def _send_ack(self, command, status):
         self.mavlink_socket.mav.command_ack_send(command, status)
 
-    def _go_to_local_point(self, msg, event):
-        # time_boot_ms, coordinate_frame, type_mask, x, y, z, vx, vy, vz, afx, afy, afz, yaw, yaw_rate
-        self.mavlink_socket.mav.position_target_local_ned_send(0, msg.coordinate_frame,
-                                                               msg.type_mask, msg.x, msg.y, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    def __handler_go_to_local_point(self, msg):
+        if len(self.cur_point) != 0:
+            if self.cur_point[0] == msg.x and self.cur_point[1] == msg.y:
+                self.mavlink_socket.mav.position_target_local_ned_send(0, msg.coordinate_frame,
+                                                                       msg.type_mask, msg.x, msg.y, 0, 0, 0,
+                                                                       0, 0, 0, 0, 0, 0)
+                return
+            else:
+                self.cur_point = [msg.x, msg.y]
+        else:
+            self.cur_point = [msg.x, msg.y]
+        self.mavlink_socket.mav.position_target_local_ned_send(0,
+                                                               msg.coordinate_frame,
+                                                               msg.type_mask,
+                                                               msg.x,
+                                                               msg.y, 0, 0, 0, 0, 0, 0, 0, 0, 0)
         if not self._vehicle.driving_thread.is_alive():
             self._vehicle.driving_thread.start()
         body_fix = False
@@ -240,13 +242,12 @@ class EdubotVehicle:
             body_fix = True
         self._vehicle.set_target(self.cur_point[0], self.cur_point[1], body_fix)
 
-
     def stop(self):
         self._vehicle.stop()
 
-    def _raspberry_reboot_shutdown(self, msg):  # мб новый поток
+    def __handler_raspberry_reboot_shutdown(self, msg):  # мб новый поток
         self._vehicle.exit_program()
-        time.sleep(2)
+        time.sleep(1)
         if msg.param1 == 0:
             os.system("sudo shutdown now")
         elif msg.param1 == 1:
@@ -260,8 +261,6 @@ class EdubotVehicle:
         """
         pwm = msg.param1
         servo = msg.param2
-        print(f'PWM {pwm}')
-        print(f'Servo {servo}')
         self._vehicle.servo(pwm)
 
     def __handler_led(self, msg):
