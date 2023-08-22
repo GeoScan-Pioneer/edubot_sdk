@@ -373,11 +373,3 @@ class EdubotGCS:  # mavwifi.Wifi
             target_system=self.mavlink_socket.target_system,
             target_component=self.mavlink_socket.target_component
         )
-
-    def fire_detection(self):
-        """ Мигание красной индикацией """
-        self.led_custom(mode=2, color1=[255, 0, 0], timer=5)
-
-    def led_control(self, led_id, r=0, g=0, b=0):
-        return self._send_command_long('RPi_LED', mavutil.mavlink.MAV_CMD_USER_1, param1=r, param2=g, param3=b,
-                                       target_system=0, target_component=0)
